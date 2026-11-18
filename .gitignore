@@ -1,0 +1,42 @@
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Raw and processed datasets
+data/raw/
+data/interim/
+data/processed/
+data/extracted/
+
+# Model artifacts
+outputs/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.engine
+
+# Experiment tracking
+mlruns/
+wandb/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
