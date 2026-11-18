@@ -190,6 +190,17 @@ The evaluator uses COCO bbox AP across all sizes, with 101 interpolated recall p
 
 Evaluation writes `outputs/evaluation/<attempt>/evaluation.json`, `events.jsonl`, and an atomic schema-versioned JSON report per completed model. Report paths go to stdout and progress to stderr. Reports include the checkpoint fingerprint and file size in bytes, image and annotation fingerprints, the split role, class mapping, evaluation settings, and code fingerprints. Checkpoint size includes training state if the saved file contains it. Resume with `--resume-from <attempt-dir>` and the original arguments in the same order. Completed reports are verified and reused. An interrupted model starts its inference from the beginning. When given explicit paths, `ict compare` requires reports from the same labeled split, code and evaluation settings.
 
+## Inspect production images
+
+`ict inspect` writes versioned JSON and CSV for one image or a JSON Lines batch. Mock mode works on CPU with Pillow and marks every record as simulated. Real mode uses a trusted, completed YOLO, Faster R-CNN, or RT-DETR run.
+
+```text
+ict inspect part.png --mock defect --output-dir outputs/inspection
+ict inspect --batch requests.jsonl --run outputs/pilot/training/faster_rcnn --trust-run --device cpu
+```
+
+The command prints the new report directory. An empty real prediction produces `review_required`. The `pass` outcome requires a separate verification record. [Inspection contracts, batch recovery, and examples](docs/inspection-interface.md)
+
 ## Inspect runs and export local reports
 
 ```text

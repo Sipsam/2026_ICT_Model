@@ -23,6 +23,7 @@ from .data.stages import DataStages
 from .environment.doctor import collect_environment
 from .environment.model import EnvironmentReport
 from .evaluation.contracts import EvaluationConfig, EvaluationError, EvaluationSplit
+from .inspection.commands import inspect_command
 from .models.contracts import ModelName, TrainingError
 from .pipeline import PipelineError, StageRunner
 from .pipeline.detection import DETECTION_STAGES, DetectionStages
@@ -49,6 +50,7 @@ app.add_typer(runs_app, name="runs")
 app.add_typer(runtime_app, name="runtime")
 app.add_typer(pilot_app, name="pilot")
 app.command("recommend")(recommend_command)
+app.command("inspect")(inspect_command)
 app.command()(status)
 app.command()(compare)
 app.command()(report)

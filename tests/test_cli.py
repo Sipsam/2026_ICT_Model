@@ -18,6 +18,7 @@ COMMANDS = (
     "data",
     "train",
     "evaluate",
+    "inspect",
     "compare",
     "report",
     "clean",
@@ -69,6 +70,7 @@ def test_cli_load_and_help_do_not_import_ml_libraries(tmp_path: Path) -> None:
         app(["--help"], standalone_mode=False)
         app(["train", "--help"], standalone_mode=False)
         app(["evaluate", "--help"], standalone_mode=False)
+        app(["inspect", "--help"], standalone_mode=False)
         app(["compare", "--help"], standalone_mode=False)
         app(["runs", "--help"], standalone_mode=False)
         app(["report", "--help"], standalone_mode=False)
