@@ -32,7 +32,7 @@ The CLI runs without PyTorch, GPU libraries, or dataset files.
 
 `ict --help` lists the registered commands, and `ict --version` prints the installed package version. Both exit with status `0`.
 
-`train`, `evaluate`, `compare`, `report`, and `clean` are placeholders and exit with status `1`. The rollout is described in [PLANS.md](PLANS.md).
+`evaluate`, `compare`, `report`, and `clean` are placeholders and exit with status `1`. The rollout is described in [PLANS.md](PLANS.md).
 
 ## Acquire and verify dataset 71900
 
@@ -70,6 +70,32 @@ With executable stages registered, `ict run` selects the entire DAG and creates 
 Each run stores an atomic snapshot in `runs/<id>/state.json` and a structured event log in `events.jsonl`. A stage writes to `work/<stage>/<attempt>/`. After output verification, the runner publishes the directory under `artifacts/<stage>/<attempt>/` and commits the successful attempt to state. Failed and abandoned attempts remain available for inspection. Only an attempt recorded as completed and verified against its fingerprints is eligible for cache reuse. A lock allows one writer per run, and the OS releases it when the process exits. Cancellation returns status `130`. Progress includes elapsed time and an ETA when the stage reports measurable work.
 
 The Python adapter interface is `Stage`, `StageInput`, `StageContext`, and `StageResult` in `ict_pipeline.pipeline`. An adapter should read the declared inputs, write artifacts exclusively to `StageContext.output_dir`, and report progress as completed and total units. `StageContext.artifact_dir` is the future published path for files that must refer to it. `StageContext.input_fingerprints` provides the verified content hash for each declared input. Adapters own data-format validation and must keep secrets out of outputs and console messages. Bump `Stage.version` when changes to an adapter affect the validity of its results.
+
+## Train detection models
+
+```text
+ict train --model faster_rcnn --dry-run
+ict train --model faster_rcnn --config-dir configs/models --approve-train
+ict train --all --dataset <conversion-attempt>/detection --config-dir configs/models --dry-run
+```
+
+Choose `yolo`, `faster_rcnn`, `rt_detr`, or `--all` for sequential training. Training starts only with `--approve-train` and initializes from architecture definitions with random weights. The default input is the standalone converter's `data/processed/detection`. Pass `--dataset` for a pipeline conversion attempt. The command preserves the generated Train and Validation splits, uses the canonical five classes, and checks that both formats have the same split membership and image bytes with `--all`. Keep the conversion artifacts stable during training.
+
+Install the extra for the selected backend, for example `python -m pip install -e ".[train-faster-rcnn]"`. Select a compatible PyTorch and TorchVision build for your OS and accelerator. The project requires Python 3.11 or newer and the training extras require PyTorch 2.6+ and TorchVision 0.21+. Ultralytics 8.3.228 declares Python 3.8+ and Transformers 4.57.6 declares Python 3.9+. For accelerator availability, use `ict doctor`. ROCm uses PyTorch's `cuda` device namespace. [PyTorch and TorchVision compatibility](https://github.com/pytorch/vision#installation), [Ultralytics package metadata](https://github.com/ultralytics/ultralytics/blob/v8.3.228/pyproject.toml), [Transformers package metadata](https://github.com/huggingface/transformers/blob/v4.57.6/setup.py).
+
+| Model | Extra and implementation | Library license | Devices and precision | Checkpoint |
+|---|---|---|---|---|
+| YOLO | `train-yolo`, Ultralytics 8.3.228 YOLO11n from YAML | [AGPL-3.0 / Ultralytics Enterprise](https://www.ultralytics.com/license) | CPU, CUDA, ROCm, MPS. FP32 or accelerator FP16 on CUDA/ROCm. | Native Ultralytics `.pt` with training state, selected by validation fitness. |
+| Faster R-CNN | `train-faster-rcnn`, TorchVision MobileNetV3-Large FPN | [BSD-3-Clause](https://github.com/pytorch/vision/blob/main/LICENSE) | CPU, CUDA, ROCm. FP32 or CUDA/ROCm FP16 and native BF16. | PyTorch state dictionary `.pt`, selected by minimum validation loss. |
+| RT-DETR | `train-rt-detr`, Transformers 4.57.6 RT-DETR with a local ResNet-18 config | [Apache-2.0](https://github.com/huggingface/transformers/blob/v4.57.6/LICENSE) | CPU, CUDA, ROCm. FP32 or CUDA/ROCm FP16 and native BF16. | PyTorch state dictionary `.pt`, selected by minimum validation loss. |
+
+The adapters use Ultralytics' detection trainer, the TorchVision model builder with both weight arguments disabled, and the Transformers RT-DETR model constructor with an explicit local backbone config. [Ultralytics training API](https://docs.ultralytics.com/modes/train/), [TorchVision Faster R-CNN API](https://docs.pytorch.org/vision/stable/models/generated/torchvision.models.detection.fasterrcnn_mobilenet_v3_large_320_fpn.html), [Transformers RT-DETR API](https://huggingface.co/docs/transformers/v4.57.6/model_doc/rt_detr).
+
+Copy the packaged [YOLO](src/ict_pipeline/models/yolo.yaml), [Faster R-CNN](src/ict_pipeline/models/faster_rcnn.yaml), or [RT-DETR](src/ict_pipeline/models/rt_detr.yaml) YAML to the directory specified by `--config-dir`. Name the files `yolo.yaml`, `faster_rcnn.yaml`, and `rt_detr.yaml` and supply one for each selected model. Each accepts `epochs`, `batch_size`, `image_size` (multiple of 32, at least 64), `optimizer` (`SGD`, `Adam`, or `AdamW`), `lr`, `seed`, `device`, `precision`, and `save_period` (0 disables periodic snapshots). The default device is CPU and `device: auto` checks for an available accelerator. YOLO uses private copies of the converted images and labels for its caches and JPEG checks. Both COCO adapters read the original converted files directly.
+
+`runs/training/<id>/<model>/run.json` records status, config, library and code versions, split and annotation fingerprints, the label policy, and relative paths and fingerprints for `best.pt` and `last.pt`. A new run gets a new ID. To resume an unfinished model, pass `--resume-from <model-run-directory>`, the original dataset and config, and `--approve-train`. Resume starts after the last saved epoch in a new directory. COCO checkpoints restore the model, optimizer and scaler and reconstruct the epoch seed. YOLO uses native training-state restoration from its EMA checkpoint and may produce a different trajectory from an uninterrupted run. Resume only from your own trusted runs because native Ultralytics checkpoints contain pickled objects. Compare models using a common evaluation metric once the evaluation stage is available.
+
+The Python entry points are `ict_pipeline.models.contracts.ModelAdapter`, `TrainingRequest`, and `Checkpoints`, and `ict_pipeline.models.registry.REGISTRY`. The standalone training command writes model artifacts that later evaluation can load. Training within `ict run` and the evaluation CLI remain planned.
 
 ## Preprocess and validate detections
 

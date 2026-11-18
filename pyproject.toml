@@ -19,6 +19,9 @@ dependencies = [
 [project.optional-dependencies]
 preprocess = ["Pillow>=10", "openpyxl>=3.1"]
 test = ["pytest>=8", "Pillow>=10", "openpyxl>=3.1"]
+train-yolo = ["torch>=2.6", "torchvision>=0.21", "ultralytics==8.3.228"]
+train-faster-rcnn = ["torch>=2.6", "torchvision>=0.21", "Pillow>=10"]
+train-rt-detr = ["torch>=2.6", "torchvision>=0.21", "Pillow>=10", "transformers==4.57.6", "scipy>=1.10"]
 
 [project.scripts]
 ict = "ict_pipeline.cli:app"
@@ -31,6 +34,7 @@ namespaces = false
 [tool.setuptools.package-data]
 "ict_pipeline.config" = ["default.yaml"]
 "ict_pipeline.data" = ["aihub_smt.yaml"]
+"ict_pipeline.models" = ["*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,0 +1,9 @@
+epochs: 50
+batch_size: 4
+image_size: 640
+optimizer: AdamW
+lr: 0.0001
+seed: 42
+device: cpu
+precision: fp32
+save_period: 0

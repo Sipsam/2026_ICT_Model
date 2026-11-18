@@ -42,7 +42,7 @@ def test_version_matches_installed_package() -> None:
     assert result.stderr == ""
 
 
-@pytest.mark.parametrize("command", ["train", "evaluate", "compare", "report", "clean"])
+@pytest.mark.parametrize("command", ["evaluate", "compare", "report", "clean"])
 def test_planned_command_reports_unavailability(
     command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -63,7 +63,7 @@ def test_cli_load_and_help_do_not_import_ml_libraries(tmp_path: Path) -> None:
         from importlib.abc import MetaPathFinder
         from types import ModuleType
 
-        blocked = {"torch", "torchvision", "ultralytics", "cupy", "cuda", "pynvml"}
+        blocked = {"torch", "torchvision", "ultralytics", "transformers", "cupy", "cuda", "pynvml"}
         attempted: list[str] = []
 
         class BlockMLImports(MetaPathFinder):
@@ -81,6 +81,7 @@ def test_cli_load_and_help_do_not_import_ml_libraries(tmp_path: Path) -> None:
         from ict_pipeline.cli import app
 
         app(["--help"], standalone_mode=False)
+        app(["train", "--help"], standalone_mode=False)
         assert not attempted, attempted
         """)
 

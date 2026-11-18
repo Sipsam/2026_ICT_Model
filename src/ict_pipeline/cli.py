@@ -4,6 +4,7 @@ import json
 import os
 from importlib.metadata import version
 from pathlib import Path
+from time import monotonic
 from typing import Annotated, NoReturn
 from uuid import uuid4
 
@@ -19,6 +20,7 @@ from .data.model import DataError, load_selection
 from .data.stages import DataStages
 from .environment.doctor import collect_environment
 from .environment.model import EnvironmentReport
+from .models.contracts import ModelName, TrainingError
 from .pipeline import PipelineError, StageRunner
 from .pipeline.model import valid_id
 from .pipeline.runner import StageEvent
@@ -300,9 +302,56 @@ def resume(
         raise typer.Exit(code=130) from None
 
 
-@app.command(help="Train detection models (planned).")
-def train() -> None:
-    _not_implemented("train")
+@app.command(help="Train a detector or all three on generated detection data.")
+def train(
+    model: Annotated[ModelName | None, typer.Option(help="Select one detector.")] = None,
+    all_models: Annotated[bool, typer.Option("--all", help="Train all detectors sequentially.")] = False,
+    dataset: Annotated[Path, typer.Option(help="Directory containing the generated yolo/ and coco/ outputs.")] = Path(
+        "data/processed/detection"
+    ),
+    runs_dir: Annotated[Path, typer.Option(help="Parent directory for new training runs.")] = Path("runs/training"),
+    config_dir: Annotated[Path | None, typer.Option(help="Read the selected model YAML files from this directory.")] = None,
+    resume_from: Annotated[Path | None, typer.Option(help="Continue a trusted earlier ICT model run into a new directory.")] = None,
+    approve_train: Annotated[bool, typer.Option("--approve-train", help="Authorize training and checkpoint writes.")] = False,
+    dry_run: Annotated[bool, typer.Option(help="Preview the selected configs and output paths.")] = False,
+) -> None:
+    from .models.registry import REGISTRY
+    from .models.training import execute_training, plan_training
+
+    if (model is not None) == all_models:
+        raise typer.BadParameter("Select exactly one of --model or --all.")
+    names = tuple(REGISTRY) if model is None else (model,)
+    timings: dict[str, tuple[float, float]] = {}
+
+    def progress(stage: str, done: int, total: int) -> None:
+        now = monotonic()
+        started, last = timings.get(stage, (now, float("-inf")))
+        if done == total or now - last >= 1:
+            elapsed = now - started
+            eta = f"{elapsed * (total - done) / done:.1f}s" if done else "unknown"
+            typer.echo(f"{stage}   {done}/{total}   elapsed {elapsed:.1f}s   ETA {eta}")
+            timings[stage] = (started, now)
+
+    try:
+        plan = plan_training(Path.cwd(), names, dataset, runs_dir, config_dir, resume_from)
+        for name, config in plan.models.items():
+            typer.echo(f"{name}   input {plan.dataset / REGISTRY[name].data_format}   output {plan.destination / name}")
+            typer.echo(config.model_dump_json())
+        if dry_run:
+            return
+        if not approve_train:
+            raise TrainingError("Training requires explicit approval. Review the scope above, then pass --approve-train.")
+        for name, checkpoints in execute_training(plan, progress):
+            typer.echo(f"{name} completed   best {checkpoints.best}   last {checkpoints.last}")
+    except (TrainingError, SetupError, PipelineError) as exc:
+        typer.echo(f"Training failed. {exc}", err=True)
+        raise typer.Exit(code=1) from None
+    except (OSError, ValueError, RuntimeError):
+        typer.echo("Training could not access local files. Check paths, permissions, and available storage.", err=True)
+        raise typer.Exit(code=1) from None
+    except KeyboardInterrupt:
+        typer.echo("Training interrupted. Use --resume-from with the model run directory and its original config.", err=True)
+        raise typer.Exit(code=130) from None
 
 
 @app.command(help="Evaluate trained models (planned).")
