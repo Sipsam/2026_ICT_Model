@@ -81,7 +81,7 @@ def _read_yolo(root: Path) -> dict[str, Split]:
     return splits
 
 
-def _read_coco(root: Path, split: str) -> Split:
+def read_coco_split(root: Path, split: str) -> Split:
     path = root / "annotations" / f"instances_{split}.json"
     data = json.loads(path.read_text(encoding="utf-8-sig"))
     categories = data["categories"]
@@ -109,7 +109,7 @@ def _read_coco(root: Path, split: str) -> Split:
     for image_id, row in images.items():
         name, width, height = row["file_name"], row["width"], row["height"]
         if (
-            not isinstance(name, str) or not safe_component(name)
+            type(image_id) is not int or not isinstance(name, str) or not safe_component(name)
             or type(width) is not int or type(height) is not int or min(width, height) <= 0
         ):
             raise ValueError
@@ -125,7 +125,7 @@ def inspect_data(
     try:
         directory = root / data_format
         splits = _read_yolo(directory) if data_format == "yolo" else {
-            split: _read_coco(directory, split) for split in SPLITS
+            split: read_coco_split(directory, split) for split in SPLITS
         }
         stage = f"fingerprint {data_format} images"
         total = sum(len(split.images) for split in splits.values())

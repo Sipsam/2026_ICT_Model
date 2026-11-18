@@ -42,7 +42,7 @@ def test_version_matches_installed_package() -> None:
     assert result.stderr == ""
 
 
-@pytest.mark.parametrize("command", ["evaluate", "compare", "report", "clean"])
+@pytest.mark.parametrize("command", ["report", "clean"])
 def test_planned_command_reports_unavailability(
     command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -82,6 +82,8 @@ def test_cli_load_and_help_do_not_import_ml_libraries(tmp_path: Path) -> None:
 
         app(["--help"], standalone_mode=False)
         app(["train", "--help"], standalone_mode=False)
+        app(["evaluate", "--help"], standalone_mode=False)
+        app(["compare", "--help"], standalone_mode=False)
         assert not attempted, attempted
         """)
 

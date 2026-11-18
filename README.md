@@ -32,7 +32,7 @@ The CLI runs without PyTorch, GPU libraries, or dataset files.
 
 `ict --help` lists the registered commands, and `ict --version` prints the installed package version. Both exit with status `0`.
 
-`evaluate`, `compare`, `report`, and `clean` are placeholders and exit with status `1`. The rollout is described in [PLANS.md](PLANS.md).
+`report` and `clean` are placeholders and exit with status `1`. The rollout is described in [PLANS.md](PLANS.md).
 
 ## Acquire and verify dataset 71900
 
@@ -93,9 +93,34 @@ The adapters use Ultralytics' detection trainer, the TorchVision model builder w
 
 Copy the packaged [YOLO](src/ict_pipeline/models/yolo.yaml), [Faster R-CNN](src/ict_pipeline/models/faster_rcnn.yaml), or [RT-DETR](src/ict_pipeline/models/rt_detr.yaml) YAML to the directory specified by `--config-dir`. Name the files `yolo.yaml`, `faster_rcnn.yaml`, and `rt_detr.yaml` and supply one for each selected model. Each accepts `epochs`, `batch_size`, `image_size` (multiple of 32, at least 64), `optimizer` (`SGD`, `Adam`, or `AdamW`), `lr`, `seed`, `device`, `precision`, and `save_period` (0 disables periodic snapshots). The default device is CPU and `device: auto` checks for an available accelerator. YOLO uses private copies of the converted images and labels for its caches and JPEG checks. Both COCO adapters read the original converted files directly.
 
-`runs/training/<id>/<model>/run.json` records status, config, library and code versions, split and annotation fingerprints, the label policy, and relative paths and fingerprints for `best.pt` and `last.pt`. A new run gets a new ID. To resume an unfinished model, pass `--resume-from <model-run-directory>`, the original dataset and config, and `--approve-train`. Resume starts after the last saved epoch in a new directory. COCO checkpoints restore the model, optimizer and scaler and reconstruct the epoch seed. YOLO uses native training-state restoration from its EMA checkpoint and may produce a different trajectory from an uninterrupted run. Resume only from your own trusted runs because native Ultralytics checkpoints contain pickled objects. Compare models using a common evaluation metric once the evaluation stage is available.
+`runs/training/<id>/<model>/run.json` records status, config, library and code versions, split and annotation fingerprints, the label policy, and relative paths and fingerprints for `best.pt` and `last.pt`. A new run gets a new ID. To resume an unfinished model, pass `--resume-from <model-run-directory>`, the original dataset and config, and `--approve-train`. Resume starts after the last saved epoch in a new directory. COCO checkpoints restore the model, optimizer and scaler and reconstruct the epoch seed. YOLO uses native training-state restoration from its EMA checkpoint and may produce a different trajectory from an uninterrupted run. Resume only from your own trusted runs because native Ultralytics checkpoints contain pickled objects.
 
-The Python entry points are `ict_pipeline.models.contracts.ModelAdapter`, `TrainingRequest`, and `Checkpoints`, and `ict_pipeline.models.registry.REGISTRY`. The standalone training command writes model artifacts that later evaluation can load. Training within `ict run` and the evaluation CLI remain planned.
+The Python entry points are `ict_pipeline.models.contracts.ModelAdapter`, `TrainingRequest`, and `Checkpoints`, and `ict_pipeline.models.registry.REGISTRY`. Training within `ict run` remains planned.
+
+## Evaluate and compare detectors
+
+```text
+ict evaluate --run runs/training/<id>/yolo --run runs/training/<id>/faster_rcnn --run runs/training/<id>/rt_detr
+ict compare outputs/evaluation/<attempt>/01-yolo.json outputs/evaluation/<attempt>/02-faster_rcnn.json outputs/evaluation/<attempt>/03-rt_detr.json
+```
+
+Pass one or more trusted, completed ICT model run directories and use the same backend extras as training. Ultralytics checkpoints can contain pickled objects. Evaluation verifies each checkpoint against its training record and defaults to `--checkpoint best`. Use `--checkpoint last` to evaluate the final saved weights. Every model infers on all images listed in the same COCO annotation file, including normal images that have zero target boxes. COCO files must use the canonical five classes, original-image pixel coordinates, and non-crowd boxes. Evaluation requires at least one ground-truth object in the selected split.
+
+The default `--split val` reads `coco/annotations/instances_val.json` and `coco/images/val/` under `--dataset`. Reports identify Validation as `validation_for_tuning`. For a separately prepared Test set, put its labels and images in the corresponding `instances_test.json` and `coco/images/test/` paths. Use `--split test --held-out` only after independently holding out Test and freezing model and protocol choices using Train and Validation. Provide the original detection directory with `--reference-dataset` if Test lives in a different directory. The command verifies the reference image fingerprints against every model's recorded Train and Validation and rejects shared filenames or byte-identical images. The holdout attestation covers production groups, near duplicates and prior tuning history, which these file checks cannot establish.
+
+The evaluator uses COCO bbox AP across all sizes, with 101 interpolated recall points, IoU thresholds from 0.50 to 0.95 in steps of 0.05, and at most 100 predictions per image and class. AP uses scores at or above `--score-floor` (default 0.001). Classes absent from ground truth have null AP and are excluded from the mAP average. Precision, recall and F1 use class-aware, score-ordered matching at `--confidence` (default 0.25) and `--match-iou` (default 0.5), with per-class counts and micro-averaged totals. The confusion matrix matches by IoU regardless of predicted class at that same operating point. Its rows are ground truth and its columns are predictions. The background row counts unmatched predictions and the background column counts missed objects. [COCO reference evaluator](https://github.com/cocodataset/cocoapi/blob/master/PythonAPI/pycocotools/cocoeval.py).
+
+| Benchmark setting | Behavior |
+|---|---|
+| Image sizing | `--image-size 640` by default. YOLO letterboxes with bilinear resize and fill 114. Faster R-CNN preserves aspect ratio within the size bound and pads to its tensor stride. RT-DETR stretches with bilinear resize. Reported boxes are mapped back to original-image pixels. |
+| Postprocessing | YOLO selects the highest-scoring class at each location and uses class-aware NMS. Faster R-CNN uses its proposal NMS and class-aware ROI NMS, with up to 1,000 retained ROI detections before the common COCO cap. The default ROI/YOLO `--nms-iou` is 0.7. RT-DETR ranks query/class scores and keeps the checkpoint architecture's query count without NMS. |
+| Warmup and timing | `--warmup 3` by default. Warmup uses the first samples in ID order and cycles through the split if needed, then every image is measured once at batch size 1. Timing includes image read/decode, resizing, host/device copies, inference, postprocessing and normalization. Model load, warmup, label matching and report I/O are excluded. FPS is timed images divided by summed latency. Latency is reported as mean, median and nearest-rank p95 in milliseconds. |
+| Synchronization and precision | CPU is synchronous. CUDA/ROCm and MPS synchronize around each timed image. Default is `--device cpu --precision fp32`. CUDA/ROCm FP16 uses half-precision weights and input for YOLO and autocast for the other adapters. The report records TF32 settings for CUDA. |
+| Hardware | The report records the available CPU and accelerator identities, device backend, OS, PyTorch thread count, driver and library versions. Cache state, thermals and host load can affect runtimes. `ict compare` flags whether reported hardware and shared runtime settings match. |
+
+Evaluation writes `outputs/evaluation/<attempt>/evaluation.json`, `events.jsonl`, and an atomic schema-versioned JSON report per completed model. Report paths go to stdout and progress to stderr. Reports include the checkpoint fingerprint and file size in bytes, image and annotation fingerprints, the split role, class mapping, evaluation settings, and code fingerprints. Checkpoint size includes training state if the saved file contains it. Resume with `--resume-from <attempt-dir>` and the original arguments in the same order. Completed reports are verified and reused. An interrupted model starts its inference from the beginning. `ict compare` emits JSON and requires reports from the same labeled split, code and evaluation settings.
+
+Python consumers can use `ict_pipeline.evaluation.contracts.Prediction` and `Predictor` for normalized, one-based detections with preprocessing metadata, and `ict_pipeline.evaluation.metrics.detection_metrics` for scoring. The report reader is `ict_pipeline.evaluation.runner.read_report`. The pipeline DAG and standalone `ict report` can consume these artifacts in a later phase.
 
 ## Preprocess and validate detections
 

@@ -86,7 +86,7 @@ def plan_training(
     return TrainingPlan(models, dataset, destination, resume_from, credentials)
 
 
-def _checkpoint_paths(name: ModelName, output: Path) -> Checkpoints:
+def checkpoint_paths(name: ModelName, output: Path) -> Checkpoints:
     directory = output / "weights" if name == "yolo" else output
     return Checkpoints(directory / "best.pt", directory / "last.pt")
 
@@ -123,7 +123,7 @@ def _resume_checkpoint(
                 raise TrainingError("Resume requires an unfinished run from the same adapter.")
             if metadata.get("run_fingerprint") != expected:
                 raise TrainingError("Resume requires the original dataset, config, device, code and library versions.")
-            paths = _checkpoint_paths(name, source)
+            paths = checkpoint_paths(name, source)
             if not paths.last.is_file():
                 raise TrainingError("The previous run has no last checkpoint. Start a fresh run.")
             records = _records(source, paths)
@@ -196,7 +196,7 @@ def _train_model(
     })
     output.mkdir(parents=True, exist_ok=False)
     started = monotonic()
-    checkpoints = _checkpoint_paths(name, output)
+    checkpoints = checkpoint_paths(name, output)
     store = RunStore(output.parent, name)
     with store.lock():
         last_logged = 0.0

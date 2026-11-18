@@ -5,7 +5,7 @@ import os
 from importlib.metadata import version
 from pathlib import Path
 from time import monotonic
-from typing import Annotated, NoReturn
+from typing import Annotated, Literal, NoReturn
 from uuid import uuid4
 
 import typer
@@ -20,6 +20,7 @@ from .data.model import DataError, load_selection
 from .data.stages import DataStages
 from .environment.doctor import collect_environment
 from .environment.model import EnvironmentReport
+from .evaluation.contracts import EvaluationConfig, EvaluationError, EvaluationSplit
 from .models.contracts import ModelName, TrainingError
 from .pipeline import PipelineError, StageRunner
 from .pipeline.model import valid_id
@@ -354,14 +355,86 @@ def train(
         raise typer.Exit(code=130) from None
 
 
-@app.command(help="Evaluate trained models (planned).")
-def evaluate() -> None:
-    _not_implemented("evaluate")
+@app.command(help="Benchmark completed detector runs on one labeled COCO split.")
+def evaluate(
+    runs: Annotated[list[Path], typer.Option("--run", help="Trusted completed model run directory. Repeat for each model.")],
+    dataset: Annotated[Path, typer.Option(help="Directory containing coco/ with images and annotations.")] = Path(
+        "data/processed/detection"
+    ),
+    split: Annotated[EvaluationSplit, typer.Option(help="Validation (val) or independent Test (test).")] = EvaluationSplit.VALIDATION,
+    held_out: Annotated[bool, typer.Option(help="Attest that Test was independently held out and never used for tuning.")] = False,
+    reference_dataset: Annotated[Path | None, typer.Option(help="Original Train/Validation COCO dataset for Test overlap checks.")] = None,
+    checkpoint: Annotated[Literal["best", "last"], typer.Option(help="Training checkpoint to evaluate.")] = "best",
+    output_dir: Annotated[Path, typer.Option(help="Parent directory for new evaluation attempts.")] = Path("outputs/evaluation"),
+    resume_from: Annotated[Path | None, typer.Option(help="Resume a previous evaluation with the original arguments.")] = None,
+    image_size: Annotated[int, typer.Option(help="Model input resize bound, a multiple of 32.")] = 640,
+    score_floor: Annotated[float, typer.Option(help="Minimum confidence retained for AP.")] = 0.001,
+    confidence: Annotated[float, typer.Option(help="Confidence cutoff for precision, recall, F1 and confusion.")] = 0.25,
+    match_iou: Annotated[float, typer.Option(help="Match IoU for fixed-confidence metrics.")] = 0.5,
+    nms_iou: Annotated[float, typer.Option(help="Class-aware NMS IoU for YOLO and Faster R-CNN.")] = 0.7,
+    warmup: Annotated[int, typer.Option(help="Number of untimed single-image warmup calls.")] = 3,
+    device: Annotated[Literal["cpu", "cuda", "rocm", "mps"], typer.Option()] = "cpu",
+    precision: Annotated[Literal["fp32", "fp16"], typer.Option()] = "fp32",
+) -> None:
+    from pydantic import ValidationError
+
+    from .evaluation.runner import evaluate_runs
+
+    timings: dict[str, tuple[float, float]] = {}
+
+    def progress(stage: str, done: int, total: int) -> None:
+        if total == 0:
+            if stage.startswith("evaluation directory "):
+                typer.echo(stage, err=True)
+            return
+        now = monotonic()
+        started, last = timings.get(stage, (now, float("-inf")))
+        if done in (0, total) or now - last >= 1:
+            elapsed = now - started
+            eta = f"{elapsed * (total - done) / done:.1f}s" if done else "unknown"
+            typer.echo(f"{stage}   {done}/{total}   elapsed {elapsed:.1f}s   ETA {eta}", err=True)
+            timings[stage] = started, now
+
+    try:
+        config = EvaluationConfig(
+            image_size=image_size, score_floor=score_floor, confidence=confidence, match_iou=match_iou,
+            nms_iou=nms_iou, warmup=warmup, device=device, precision=precision,
+        )
+        for report_path in evaluate_runs(
+            Path.cwd(), tuple(runs), dataset, split, config, output_dir, checkpoint, held_out,
+            reference_dataset, resume_from, progress,
+        ):
+            typer.echo(str(report_path))
+    except ValidationError as exc:
+        fields = ", ".join(str(error["loc"][0]) for error in exc.errors(include_input=False))
+        typer.echo(f"Invalid evaluation options. Check {fields}.", err=True)
+        raise typer.Exit(code=2) from None
+    except (EvaluationError, SetupError, TrainingError, PipelineError) as exc:
+        typer.echo(f"Evaluation failed. {exc}", err=True)
+        raise typer.Exit(code=1) from None
+    except (OSError, ValueError, RuntimeError):
+        typer.echo("Evaluation could not access local files. Check inputs, permissions, and storage.", err=True)
+        raise typer.Exit(code=1) from None
+    except KeyboardInterrupt:
+        typer.echo("Evaluation interrupted. Resume with the evaluation directory and original arguments.", err=True)
+        raise typer.Exit(code=130) from None
 
 
-@app.command(help="Compare model evaluation results (planned).")
-def compare() -> None:
-    _not_implemented("compare")
+@app.command(help="Compare completed reports from the same labeled split and protocol.")
+def compare(
+    reports: Annotated[list[Path], typer.Argument(help="Two or more model evaluation JSON reports.")],
+) -> None:
+    from .evaluation.runner import compare_reports
+
+    try:
+        comparison = compare_reports(Path.cwd(), tuple(reports))
+        typer.echo(json.dumps(comparison, indent=2, allow_nan=False))
+    except (EvaluationError, SetupError) as exc:
+        typer.echo(f"Comparison failed. {exc}", err=True)
+        raise typer.Exit(code=1) from None
+    except (OSError, ValueError, RuntimeError):
+        typer.echo("Comparison failed. Check report contents and file permissions.", err=True)
+        raise typer.Exit(code=1) from None
 
 
 @app.command(help="Generate pipeline reports (planned).")
