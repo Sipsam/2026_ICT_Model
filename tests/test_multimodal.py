@@ -8,11 +8,15 @@ from openpyxl import Workbook
 from PIL import Image
 from typer.testing import CliRunner
 
+from ict_pipeline import smoke
 from ict_pipeline.classification.sensors import SampleIssue
 from ict_pipeline.cli import app
 from ict_pipeline.data.preprocessing.audit import XLSX_FIELDS
 from ict_pipeline.data.preprocessing.common import CsvRow, write_csv, write_json
+from ict_pipeline.data.preprocessing.leakage import AnalysisConfig, analyze_leakage
 from ict_pipeline.data.preprocessing.policy import SENSOR_FIELDS, label_policy
+from ict_pipeline.data.preprocessing.revision import read_dataset_seal
+from ict_pipeline.data.preprocessing.split import SplitConfig, plan_split
 from ict_pipeline.inspection.contracts import SensorInput
 from ict_pipeline.models.optimization.config import Augmentation, Geometric
 from ict_pipeline.multimodal.audit import Cohort, audit_cohort, audit_report
@@ -383,3 +387,40 @@ def test_published_membership_and_source_fingerprints_cover_internal_test(tmp_pa
     (root / validation["image_path"]).write_bytes(b"changed")
     with pytest.raises(ValueError, match="Source files changed"):
         audit_cohort(root, manifest, revision_path=path)
+
+
+def test_smoke_revision_binds_selected_sources_for_multimodal_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "source"
+    rows = tuple(_sample(root, index, values=(float(index),)) for index in range(1, 5))
+    manifest = _manifest(tmp_path / "original.csv", *rows)
+    report = analyze_leakage(root, manifest, root, AnalysisConfig())
+    analysis = tmp_path / "leakage.json"
+    write_json(analysis, {"fingerprint": digest_json(report), "report": report})
+    selections = [
+        {"sample_index": index, "split": split, "group_id": digest_json(index)}
+        for index, split in enumerate(("train", "validation", "test"))
+    ]
+
+    def fixture_plan(report: dict, config: SplitConfig) -> dict:
+        plan = plan_split(report, config)
+        return {**plan, "missing_classes": {}, "remaining_cross_split_groups": {}}
+
+    monkeypatch.setattr(smoke, "plan_split", fixture_plan)
+    monkeypatch.setattr(smoke, "select_samples", lambda _report, _plan: selections)
+    monkeypatch.setattr(smoke, "smoke_profiles", lambda _cache: {})
+    bundle = tmp_path / "smoke"
+    revision = smoke.prepare(root, manifest, root, analysis, bundle, tmp_path / "weights")
+    sealed = read_dataset_seal(bundle / "detection")
+    assert sealed is not None and digest_json(sealed["split"]) == digest_json(revision)
+    cohort = audit_cohort(root, bundle / "manifest.csv", revision_path=bundle / "split.json")
+    assert cohort.revision_id == revision["revision_id"]
+    assert cohort.input_fingerprint == revision["selected_source_fingerprint"] != revision["dataset_fingerprint"]
+    assert [record.split for record in cohort.records] == ["train", "validation", "test"]
+    assert all(record.sequence is not None for record in cohort.records)
+
+    workbook = root / rows[0]["sensor_path"]
+    workbook.write_bytes(workbook.read_bytes() + b"changed")
+    with pytest.raises(ValueError, match="Source files changed"):
+        audit_cohort(root, bundle / "manifest.csv", revision_path=bundle / "split.json")

@@ -168,8 +168,10 @@ def audit_cohort(
             if progress:
                 progress(index + 1, len(rows))
         input_fingerprint = digest_json(inputs)
-        if revision is not None and input_fingerprint != revision["dataset_fingerprint"]:
-            raise ValueError("Source files changed since the split revision was published.")
+        if revision is not None:
+            expected_source = revision.get("selected_source_fingerprint", revision["dataset_fingerprint"])
+            if input_fingerprint != expected_source:
+                raise ValueError("Source files changed since the split revision was published.")
         records = _isolate(records)
         if cache:
             cache.stage("complete")

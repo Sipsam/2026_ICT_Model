@@ -62,7 +62,7 @@ The benchmark uses Validation by default. The report prints the path to its HTML
 
 `ict --help` lists the registered commands, and `ict --version` prints the installed package version. Both exit with status `0`.
 
-`clean` is a placeholder and exits with status `1`.
+`ict clean` previews managed pytest sessions by default. Deletion requires an exact session ID and explicit confirmation. [Artifact management](docs/artifact-management.md)
 
 Use `ict runtime` to run preprocessing, training, or Validation evaluation on the local machine, in Docker, or on a Linux SSH server. The [runtime guide](docs/runtime.md) covers setup, job recovery, device checks, and platform limitations.
 
@@ -134,6 +134,8 @@ To run individual stages against a saved detector run, repeat the original model
 Training resumes from each model's latest verified epoch checkpoint. The runner stores the underlying attempts under `runs/<id>/recovery/train/`. By default this includes the private YOLO dataset copy. Set `ICT_TRAIN_CACHE_ROOT` on the machine doing the training to put the private copy and its caches on another volume. A model without a verified recovery checkpoint needs a fresh approved attempt. Validation inference restarts its stage if interrupted. Published outputs use new attempt directories when a stage needs to be rebuilt.
 
 ## Train detection models
+
+See the [pre-training readiness audit](docs/pretraining-readiness.md) for verified environments, dataset and checkpoint requirements, and the frozen Validation and internal Test policies.
 
 Use `ict recommend --all` on the training host to inspect model readiness and starting batch sizes, precision, workers, and resource estimates. Use `ict pilot prepare` to derive a bounded cohort from a sealed split bundle, then preview training with `ict pilot run`. Adding `--approve-train` authorizes only the displayed pilot. Pilots keep their own checkpoint and Validation reports under the cohort's `attempts/` directory. [Hardware recommendations and pilot workflow](docs/gpu-training-pilot.md)
 

@@ -12,7 +12,7 @@ import yaml
 from .data.preprocessing.common import write_csv, write_json
 from .data.preprocessing.console import console_progress, fresh_output, protect_source_data
 from .data.preprocessing.convert import convert_detection
-from .data.preprocessing.leakage import file_sha, source_hashes, source_rows
+from .data.preprocessing.leakage import MODALITIES, file_sha, source_hashes, source_rows
 from .data.preprocessing.policy import NAMES, label_policy
 from .data.preprocessing.revision import SEAL, seal_dataset
 from .data.preprocessing.split import SplitConfig, plan_split
@@ -123,10 +123,15 @@ def prepare(root: Path, manifest: Path, base: Path, analysis: Path, out: Path, c
         "source_manifest_fingerprint": report["manifest_fingerprint"], "parent_preview_fingerprint": digest_json(plan),
         "configuration": plan["configuration"], "grouping_methods": plan["grouping_methods"],
         "selected_manifest_fingerprint": digest_json(selected),
+        "selected_source_fingerprint": digest_json([
+            [{key: row[key] for key in MODALITIES}, entry["hashes"]]
+            for row, entry in zip(selected, evidence, strict=True)
+        ]),
         "selected_images_fingerprint": digest_json([entry["hashes"]["image_path"] for entry in evidence]),
         "selected_annotations_fingerprint": digest_json([entry["hashes"]["annotation_path"] for entry in evidence]),
         "counts": dict(Counter(row["split"] for row in selected)),
         "class_samples": {split: dict.fromkeys(STRATA, PER_STRATUM) for split in plan["counts"]},
+        "assignments": evidence,
     }
     revision["revision_id"] = digest_json(revision)
     with fresh_output(out, root) as working:
@@ -146,7 +151,7 @@ def prepare(root: Path, manifest: Path, base: Path, analysis: Path, out: Path, c
                    for fmt in ("yolo", "coco")) or file_sha(root / row["annotation_path"]) != entry["hashes"]["annotation_path"]:
                 raise ValueError("Selected source changed during conversion.")
         write_json(dataset / SEAL, seal_dataset(dataset, revision))
-        write_json(working / "split.json", {**revision, "assignments": evidence})
+        write_json(working / "split.json", revision)
         write_json(working / "preparation.json", {
             "provider_candidate_counts": report["candidate_split_counts"],
             "provider_preview": {k: v for k, v in plan_split(report, SplitConfig(
@@ -163,7 +168,7 @@ def prepare(root: Path, manifest: Path, base: Path, analysis: Path, out: Path, c
         profiles.mkdir()
         for name, config in configs.items():
             (profiles / f"{name}.yaml").write_text(yaml.safe_dump(config.model_dump(mode="json")), encoding="utf-8")
-    return revision
+    return {key: value for key, value in revision.items() if key != "assignments"}
 
 
 def main() -> None:
