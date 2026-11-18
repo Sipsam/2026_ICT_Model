@@ -8,6 +8,7 @@ from types import MappingProxyType
 from uuid import uuid4
 
 from ..config.settings import Credentials, Settings
+from ..disk import StorageError, require_space
 from ..reporting.metadata import runtime_snapshot
 from .model import PipelineError, Stage, StageContext, StageFailure, StageGraph, StageResult, valid_id
 from .store import (
@@ -301,6 +302,7 @@ class StageRunner:
     ) -> StageRecord:
         name, attempt = stage.name, uuid4().hex
         started = monotonic()
+        last_storage_check = started
         settings = self._stage_settings(stage)
         record = StageRecord(
             status="running", attempt=attempt, started_at=timestamp(), config_fingerprint=digest_json(settings),
@@ -317,12 +319,23 @@ class StageRunner:
                 eta, detail,
             ))
 
+        def check_space(label: str) -> None:
+            try:
+                require_space(store.directory, label=label)
+            except StorageError as exc:
+                raise StageFailure(str(exc)) from None
+
         def progress(units: int, expected: int | None) -> None:
+            nonlocal last_storage_check
             if (
                 type(units) is not int or units < 0
                 or (expected is not None and (type(expected) is not int or expected < units))
             ):
                 raise ValueError("Invalid stage progress.")
+            now = monotonic()
+            if now - last_storage_check >= 1:
+                check_space(f"pipeline stage {name}")
+                last_storage_check = now
             emit("progress", units=units, expected=expected)
 
         try:
@@ -330,6 +343,7 @@ class StageRunner:
             emit("running")
             if stage.execute is None:
                 raise PipelineError(f"Stage {name} requires an adapter. See the pipeline phases in PLANS.md.")
+            check_space(f"pipeline stage {name}")
             inputs, record.fingerprint, input_fingerprints = self._inputs(store, stage, available)
             record.input_fingerprints = input_fingerprints
             temporary = store.working_dir(name, attempt)
@@ -357,6 +371,7 @@ class StageRunner:
                 if isinstance(result, StageResult):
                     reason = _FAILURE_DETAILS[result]
                 raise PipelineError(f"Stage {name} {reason}, then resume.")
+            check_space(f"publishing pipeline stage {name}")
             try:
                 output_fingerprint = self._verify_outputs(stage, temporary)
             except FingerprintError:

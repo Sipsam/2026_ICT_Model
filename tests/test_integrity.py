@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 from collections import Counter
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -129,7 +130,7 @@ def test_analysis_checkpoint_reuses_verified_observations(
 
     with pytest.raises(KeyboardInterrupt):
         analyze_leakage(root, manifest, root, config, interrupt, checkpoint=checkpoint)
-    with sqlite3.connect(checkpoint) as db:
+    with closing(sqlite3.connect(checkpoint)) as db:
         assert db.execute("SELECT status FROM analysis").fetchone() == ("interrupted",)
         assert db.execute("SELECT COUNT(*) FROM observations").fetchone() == (3,)
     changed = root / leakage.source_rows(manifest, root, root)[0]["image_path"]

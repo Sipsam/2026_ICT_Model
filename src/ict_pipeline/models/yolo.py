@@ -5,11 +5,13 @@ import os
 from numbers import Real
 from pathlib import Path
 from shutil import copyfile
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
 from ..data.preprocessing.policy import NAMES
+from ..training_storage import commit_checkpoint, guard_training_write
 from .contracts import Checkpoints, TrainingError, TrainingRequest
 from .weights import LAYOUTS, load_weights, transfer_state
 
@@ -18,7 +20,13 @@ class YoloAdapter:
     architecture = LAYOUTS["yolo"].architecture
 
     def train(self, request: TrainingRequest) -> Checkpoints:
-        directory = request.output / "dataset"
+        if request.cache_root is None:
+            return self._train_with_copy(request, request.output / "dataset")
+        request.cache_root.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(prefix="ict-yolo-", dir=request.cache_root) as scratch:
+            return self._train_with_copy(request, Path(scratch))
+
+    def _train_with_copy(self, request: TrainingRequest, directory: Path) -> Checkpoints:
         total = sum(len(split.images) for split in request.data.splits.values())
         copied = 0
         for name, split in request.data.splits.items():
@@ -29,6 +37,7 @@ class YoloAdapter:
             for image, label in zip(split.images, split.annotations, strict=True):
                 # Ultralytics can rewrite corrupt JPEGs while scanning. Never give it
                 # links or the original detection files.
+                guard_training_write(directory, image.stat().st_size + label.stat().st_size)
                 copyfile(image, images / image.name)
                 copyfile(label, labels / label.name)
                 copied += 1
@@ -104,26 +113,30 @@ class YoloAdapter:
                         best = request.resume.last
                     if not best.is_file():
                         raise TrainingError("The resume run is missing its best YOLO checkpoint.")
+                    guard_training_write(self.best.parent, best.stat().st_size)
                     copyfile(best, self.best)
                 super().resume_training(checkpoint)
 
             def save_model(self) -> None:
                 if not self.loss.isfinite().all().item() or not math.isfinite(self.fitness):
                     raise TrainingError("YOLO produced non-finite training results. Try fp32 or lower lr.")
+                request.check_checkpoint_space()
+                epoch = self.epoch + 1
                 last, best = self.last, self.best
-                self.last, self.best = last.with_suffix(".tmp"), best.with_suffix(".tmp")
+                temporary, native_best = last.with_suffix(".tmp"), best.with_suffix(".tmp")
+                self.last, self.best = temporary, native_best
                 try:
                     super().save_model()
-                    self.last.replace(last)
-                    if self.best.is_file():
-                        self.best.replace(best)
+                    # Ultralytics writes identical bytes to both paths on a best epoch.
+                    snapshots = [best] if native_best.is_file() else []
+                    native_best.unlink(missing_ok=True)
+                    if cfg.save_period and epoch % cfg.save_period == 0:
+                        snapshots.append(self.wdir / f"epoch-{epoch}.pt")
+                    commit_checkpoint(temporary, last, tuple(snapshots))
                 finally:
                     self.last, self.best = last, best
-                epoch = self.epoch + 1
-                if cfg.save_period and epoch % cfg.save_period == 0:
-                    temporary = self.wdir / "periodic.tmp"
-                    copyfile(last, temporary)
-                    temporary.replace(self.wdir / f"epoch-{epoch}.pt")
+                    temporary.unlink(missing_ok=True)
+                    native_best.unlink(missing_ok=True)
                 request.record_metrics({
                     **{key: float(value) for key, value in self.metrics.items() if isinstance(value, Real)},
                     **{key: float(value) for key, value in self.label_loss_items(self.tloss).items()},

@@ -23,9 +23,10 @@ from ..evaluation.metrics import detection_metrics
 from ..models.contracts import ModelName, Progress, TrainConfig, TrainingError
 from ..models.dataset import Split, inspect_data
 from ..models.registry import REGISTRY
-from ..models.training import TrainingPlan, checkpoint_paths, execute_training, read_training_profile
+from ..models.training import STORAGE_PREDECESSORS, TrainingPlan, checkpoint_paths, execute_training, read_training_profile
 from ..models.weights import checkpoint_source, training_scope, verify_weights, weight_packages
 from ..reporting.export import ReportFormat, report_document, write_report_file
+from ..training_storage import commit_checkpoint, guard_training_write
 from .model import StageContext, StageFailure, StageResult
 from .store import RunStore, digest_json, fingerprint_path, timestamp
 
@@ -94,16 +95,17 @@ class DetectionStages:
                     f"{json.dumps(training_scope(name, config, self.weight_sources.get(name)))}"
                 ))
 
-    def model_revision(self, name: ModelName) -> str:
+    def model_revision(self, name: ModelName, predecessor: Mapping[str, str] | None = None) -> str:
         config, fingerprint = self.profiles[name]
+        code = {
+            path.name: fingerprint_path(path)
+            for path in sorted((Path(__file__).parents[1] / "models").glob("*.py"))
+        }
         return digest_json({
             "config": config.model_dump(mode="json"), "profile": fingerprint,
             "runtime": [platform.python_version(), platform.system(), platform.machine()],
             "packages": _package_versions(REGISTRY[name].libraries + weight_packages(config)),
-            "code": {
-                path.name: fingerprint_path(path)
-                for path in sorted((Path(__file__).parents[1] / "models").glob("*.py"))
-            },
+            "code": {**code, **(predecessor or {})},
         })
 
     @_adapter
@@ -143,9 +145,20 @@ class DetectionStages:
             weight_path = context.inputs.get(weight_input)
             if config.checkpoint is not None:
                 verify_weights(name, config, weight_path, REGISTRY[name].versions())
-            identity = digest_json([revision, name, self.model_revision(name), context.input_fingerprints.get(weight_input)])
-            root = RunStore(context.recovery_dir, identity, self.credentials).directory
+            def recovery_root(predecessor: Mapping[str, str] | None = None) -> Path:
+                identity = digest_json([
+                    revision, name, self.model_revision(name, predecessor), context.input_fingerprints.get(weight_input),
+                ])
+                return RunStore(context.recovery_dir, identity, self.credentials).directory
+
+            root = recovery_root()
             model, resume = self._recover(root, name, config, profile_hash, revision)
+            if model is None:
+                for predecessor in STORAGE_PREDECESSORS:
+                    model, earlier_resume = self._recover(recovery_root(predecessor), name, config, profile_hash, revision)
+                    resume = resume or earlier_resume
+                    if model is not None:
+                        break
             if model is None:
                 # A saved attempt or a previous approval never authorizes new work.
                 if not self.approved:
@@ -155,7 +168,7 @@ class DetectionStages:
                     )
                 plan = TrainingPlan(
                     {name: config}, dataset, root / uuid4().hex, resume, self.credentials, self.workspace,
-                    revision, profile_hash, data, {name: weight_path} if weight_path else {},
+                    revision, profile_hash, data, {name: weight_path} if weight_path else {}, publish_checkpoints=True,
                 )
                 list(execute_training(plan, progress))
                 model = plan.destination / name
@@ -208,9 +221,19 @@ class DetectionStages:
 
     def _publish_model(self, source: Path, output: Path, name: ModelName) -> None:
         origin, targets = checkpoint_paths(name, source), checkpoint_paths(name, output)
+        best, last = (evaluation.inspect_checkpoint(source, kind, self.credentials) for kind in ("best", "last"))
+        guard_training_write(output, origin.best.stat().st_size + origin.last.stat().st_size)
         targets.last.parent.mkdir(parents=True)
-        copyfile(origin.best, targets.best)
-        copyfile(origin.last, targets.last)
+        if best.fingerprint == last.fingerprint:
+            temporary = targets.last.with_suffix(".tmp")
+            try:
+                copyfile(origin.last, temporary)
+                commit_checkpoint(temporary, targets.last, (targets.best,))
+            finally:
+                temporary.unlink(missing_ok=True)
+        else:
+            copyfile(origin.best, targets.best)
+            copyfile(origin.last, targets.last)
         copyfile(source / "run.json", output / "run.json")
         for kind in ("best", "last"):
             evaluation.inspect_checkpoint(output, kind, self.credentials)

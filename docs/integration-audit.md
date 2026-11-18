@@ -1,5 +1,7 @@
 # Integration and reliability audit
 
+See [artifact management](artifact-management.md) for the current Windows storage audit, pytest lifecycle checks, and the measured CPU fixture footprint.
+
 2026-11-18, Windows AMD64, Python 3.11.9 in the existing editable `ict-pipeline` 0.1.0 environment. Commands that write artifacts used fresh temporary workspaces. The audit used the existing SMT dataset 71900, the repository's CPU fixtures, and locally installed dependencies.
 
 ## Local verification

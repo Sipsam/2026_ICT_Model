@@ -50,12 +50,12 @@ def detection(tmp_path: Path) -> Path:
     return result
 
 
-def config_directory(tmp_path: Path, epochs: int = 1) -> Path:
+def config_directory(tmp_path: Path, epochs: int = 1, *, save_period: int = 0) -> Path:
     folder = tmp_path / "models"
     folder.mkdir()
     for model in REGISTRY:
         (folder / f"{model}.yaml").write_text(
-            f"epochs: {epochs}\nbatch_size: 2\nimage_size: 64\nlr: 0.0001\nsave_period: 1\n", encoding="utf-8",
+            f"epochs: {epochs}\nbatch_size: 2\nimage_size: 64\nlr: 0.0001\nsave_period: {save_period}\n", encoding="utf-8",
         )
     return folder
 
@@ -213,6 +213,7 @@ def optional_runtime(name: ModelName) -> ModuleType:
     return torch
 
 
+@pytest.mark.cpu_backend
 @pytest.mark.parametrize("name", tuple(REGISTRY))
 def test_tiny_cpu_training(
     name: ModelName, detection: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -225,7 +226,7 @@ def test_tiny_cpu_training(
     try:
         result = CliRunner().invoke(app, [
             "train", "--model", name, "--dataset", str(detection),
-            "--config-dir", str(config_directory(tmp_path)), "--approve-train",
+            "--config-dir", str(config_directory(tmp_path, save_period=1)), "--approve-train",
         ])
         assert result.exit_code == 0, result.output
         metadata_path, = (tmp_path / "runs").rglob("run.json")
@@ -233,8 +234,9 @@ def test_tiny_cpu_training(
         assert metadata["status"] == "completed"
         for item in metadata["checkpoints"].values():
             assert fingerprint_path(metadata_path.parent / item["path"]) == item["fingerprint"]
-        assert next(metadata_path.parent.rglob("epoch-1.pt")).is_file()
+        periodic, = metadata_path.parent.rglob("epoch-1.pt")
         last = metadata_path.parent / metadata["checkpoints"]["last"]["path"]
+        assert fingerprint_path(periodic) == fingerprint_path(last)
         if name == ModelName.YOLO:
             from ultralytics.nn.tasks import load_checkpoint
 
@@ -279,6 +281,7 @@ def test_tiny_cpu_training(
         torch.set_num_threads(threads)
 
 
+@pytest.mark.cpu_backend
 @pytest.mark.parametrize("name", tuple(REGISTRY))
 def test_resume_after_epoch_checkpoint(
     name: ModelName, detection: Path, tmp_path: Path,

@@ -9,6 +9,7 @@ from shutil import copyfile
 from typing import TYPE_CHECKING, Any
 
 from ..data.preprocessing.policy import NAMES
+from ..training_storage import commit_checkpoint, guard_training_write
 from .contracts import Checkpoints, TrainConfig, TrainingError, TrainingRequest
 from .dataset import Sample
 from .weights import LAYOUTS, load_weights, transfer_state
@@ -43,8 +44,12 @@ def collate(items: list[tuple[Any, Sample]]) -> Batch:
 
 def _atomic_copy(source: Path, target: Path) -> None:
     temporary = target.with_suffix(".tmp")
-    copyfile(source, temporary)
-    temporary.replace(target)
+    guard_training_write(target.parent, source.stat().st_size)
+    try:
+        copyfile(source, temporary)
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 class CocoAdapter:
@@ -168,13 +173,18 @@ class CocoAdapter:
                 "epoch": epoch, "best_epoch": best_epoch, "best_loss": best_loss, "val_loss": val_loss,
                 "model": model.state_dict(), "optimizer": optimizer.state_dict(), "scaler": scaler.state_dict(),
             }
-            temporary = checkpoints.last.with_suffix(".tmp")
-            torch.save(state, temporary)
-            temporary.replace(checkpoints.last)
+            request.check_checkpoint_space()
+            snapshots = []
             if best_epoch == epoch:
-                _atomic_copy(checkpoints.last, checkpoints.best)
+                snapshots.append(checkpoints.best)
             if cfg.save_period and epoch % cfg.save_period == 0:
-                _atomic_copy(checkpoints.last, request.output / f"epoch-{epoch}.pt")
+                snapshots.append(request.output / f"epoch-{epoch}.pt")
+            temporary = checkpoints.last.with_suffix(".tmp")
+            try:
+                torch.save(state, temporary)
+                commit_checkpoint(temporary, checkpoints.last, tuple(snapshots))
+            finally:
+                temporary.unlink(missing_ok=True)
             request.record_metrics({
                 "epoch": epoch, "train_loss": train_loss / len(train.dataset),
                 "val_loss": val_loss, "best_val_loss": best_loss,

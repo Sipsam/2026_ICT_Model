@@ -178,8 +178,28 @@ class ContainerExecutor:
             timeout=None if request.action == "run" else 90, env=env,
         ), self.credentials)
         if request.action == "preflight" and task:
-            result.update(job_directory=str(store.directory), dataset=task.dataset,
-                          free_bytes=disk_usage(store.directory.parent).free)
+            free_bytes = disk_usage(store.directory.parent).free
+            result.update(job_directory=str(store.directory), dataset=task.dataset, free_bytes=free_bytes)
+            storage = result.get("storage")
+            if storage is not None:
+                if not isinstance(storage, list) or not storage or any(
+                    not isinstance(row, dict) or type(row.get("measured_free_bytes")) is not int
+                    or type(row.get("required_bytes")) is not int or not isinstance(row.get("path"), str)
+                    for row in storage
+                ):
+                    raise ExecutorError("The Docker worker returned an incompatible storage estimate.")
+                storage[0].update(path=str(store.directory.parent), measured_free_bytes=free_bytes)
+                result.pop("storage_reason", None)
+                result["storage_ready"] = True
+                for row in storage:
+                    if row["measured_free_bytes"] < row["required_bytes"]:
+                        result.update(
+                            storage_ready=False,
+                            storage_reason=f"Low disk space for training at {row['path']}. "
+                            f"Measured free bytes: {row['measured_free_bytes']}; "
+                            f"estimated required bytes: {row['required_bytes']}.",
+                        )
+                        break
         return result
 
 

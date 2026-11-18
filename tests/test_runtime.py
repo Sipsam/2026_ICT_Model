@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+from ict_pipeline import disk, training_storage
 from ict_pipeline.cli import app
 from ict_pipeline.config.settings import Credentials, SetupError
 from ict_pipeline.environment.model import Backend, Torch
@@ -129,6 +130,12 @@ def test_training_reuses_config_and_explicit_device(
     request = WorkerRequest(action="run", workspace=str(workspace), job="train", task=task)
     scope = LocalExecutor().execute(request.model_copy(update={"action": "preflight"}))
     assert scope["ready"] and scope["training"]["initialization"] == ("pretrained" if pretrained else "scratch")
+    assert scope["storage_ready"] and scope["storage"][0]["estimated_checkpoint_bytes"] > 0
+    with monkeypatch.context() as low_disk:
+        low_disk.setattr(training_storage, "volume_at", lambda path: disk.Volume(1, path, 1))
+        with pytest.raises(ExecutorError, match="Low disk space for training"):
+            LocalExecutor().execute(request)
+        assert not (workspace / "train").exists() and not plans
     result = LocalExecutor().execute(request)
     assert result["status"] == "completed"
     assert len(plans) == 1

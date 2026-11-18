@@ -2,7 +2,7 @@
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from importlib.metadata import version
 from pathlib import Path
 from time import monotonic
@@ -70,11 +70,6 @@ def main(
     ] = False,
 ) -> None:
     """Register options shared by the top-level command."""
-
-
-def _not_implemented(command: str) -> NoReturn:
-    Console(stderr=True).print(f"ict {command} is not yet implemented.", highlight=False)
-    raise typer.Exit(code=1)
 
 
 def _display_value(value: str | int | bool | None) -> str:
@@ -462,6 +457,7 @@ def train(
     from .models.registry import REGISTRY
     from .models.training import execute_training, plan_training
     from .models.weights import training_scope
+    from .training_storage import storage_estimates
 
     if (model is not None) == all_models:
         raise typer.BadParameter("Select exactly one of --model or --all.")
@@ -483,6 +479,8 @@ def train(
             typer.echo(f"{name}   input {plan.dataset / REGISTRY[name].data_format}   output {plan.destination / name}")
             typer.echo(config.model_dump_json())
             typer.echo(plan.credentials.redact_text(json.dumps(training_scope(name, config, plan.weight_sources.get(name)))))
+        for estimate in storage_estimates(plan):
+            typer.echo(plan.credentials.redact_text(json.dumps({"storage": asdict(estimate)})))
         if dry_run:
             return
         if not approve_train:
@@ -566,6 +564,36 @@ def evaluate(
         raise typer.Exit(code=130) from None
 
 
-@app.command(help="Clean generated artifacts (planned).")
-def clean() -> None:
-    _not_implemented("clean")
+@app.command(help="Preview or remove an explicitly selected managed pytest session.")
+def clean(
+    root: Annotated[Path | None, typer.Option(help="Parent used by pytest --ict-artifact-root.")] = None,
+    older_than_hours: Annotated[float, typer.Option(min=0, help="Minimum age of an eligible session.")] = 24,
+    dry_run: Annotated[bool, typer.Option(help="Preview managed sessions. This is the default.")] = False,
+    delete: Annotated[str | None, typer.Option(help="Exact session ID from a preview.")] = None,
+    confirm: Annotated[bool, typer.Option(help="Authorize deletion of the specified session ID.")] = False,
+) -> None:
+    from math import isfinite
+
+    from .test_artifacts import artifact_root, delete_session, preview_cleanup
+
+    if not isfinite(older_than_hours):
+        raise typer.BadParameter("Provide a finite minimum age.")
+    if dry_run and delete or confirm and not delete:
+        raise typer.BadParameter("Use preview or specify --delete ID --confirm.")
+    try:
+        managed = artifact_root(root)
+        candidates = list(preview_cleanup(managed, age_hours=older_than_hours))
+        for item in candidates:
+            size = f"{item.logical_bytes} logical bytes" if item.logical_bytes is not None else "size unavailable"
+            typer.echo(f"{item.path} | {item.owner} | {item.status} | {size} | {item.detail}")
+        if not candidates:
+            typer.echo(f"No registered sessions under {managed}.")
+        if delete:
+            if not confirm:
+                raise PipelineError("Review the preview and pass --delete ID --confirm to authorize that session.")
+            delete_session(managed, delete, age_hours=older_than_hours)
+            typer.echo(f"Removed session {delete}.")
+    except (OSError, PipelineError, ValueError) as exc:
+        detail = str(exc) if isinstance(exc, PipelineError) else "Check access to the managed test artifact root."
+        typer.echo(f"Cleanup failed. {detail}", err=True)
+        raise typer.Exit(code=1) from None

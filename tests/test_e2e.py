@@ -600,6 +600,7 @@ def test_detection_dag_rejects_mismatched_labels_and_bad_predictions(
     command("evaluate", "--run", str(model), "--dataset", str(changed), code=1, contains="verified detection revision")
 
 
+@pytest.mark.cpu_backend
 @pytest.mark.parametrize("name", tuple(REGISTRY))
 def test_detection_dag_actual_cpu_backend(name: ModelName, journey: Fixture) -> None:
     torch = optional_runtime(name)

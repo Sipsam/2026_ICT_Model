@@ -4,7 +4,6 @@ from importlib.metadata import version
 from pathlib import Path
 from textwrap import dedent
 
-import pytest
 from typer.testing import CliRunner
 
 from ict_pipeline.cli import app
@@ -41,20 +40,6 @@ def test_version_matches_installed_package() -> None:
     assert result.exit_code == 0
     assert result.stdout.strip() == f"ict {version('ict-pipeline')}"
     assert result.stderr == ""
-
-
-@pytest.mark.parametrize("command", ["clean"])
-def test_planned_command_reports_unavailability(
-    command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.chdir(tmp_path)
-
-    result = runner.invoke(app, [command])
-
-    assert result.exit_code == 1
-    assert result.stdout == ""
-    assert result.stderr.strip() == f"ict {command} is not yet implemented."
-    assert list(tmp_path.iterdir()) == []
 
 
 def test_cli_load_and_help_do_not_import_ml_libraries(tmp_path: Path) -> None:

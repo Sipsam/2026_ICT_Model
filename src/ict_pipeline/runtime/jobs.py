@@ -110,6 +110,7 @@ def preflight(store: RunStore, task: JobRequest) -> dict[str, object]:
         try:
             from ..models.training import plan_training
             from ..models.weights import training_scope, verify_weights
+            from ..training_storage import check_training_storage, storage_estimates
 
             plan = plan_training(
                 store.directory, (task.model,), dataset, store.directory / "runs" / "training",
@@ -119,8 +120,17 @@ def preflight(store: RunStore, task: JobRequest) -> dict[str, object]:
             profile = plan.models[task.model]
             source = plan.weight_sources.get(task.model)
             report["training"] = store.credentials.redact(training_scope(task.model, profile, source))
+            estimates = storage_estimates(plan)
+            report["storage"] = [asdict(item) for item in estimates]
+            report["storage_ready"] = True
+            try:
+                check_training_storage(estimates)
+            except TrainingError as exc:
+                # Keep storage readiness separate from hardware readiness.
+                # Docker previews measure the mounted output volume on the host.
+                report.update(storage_ready=False, storage_reason=store.credentials.redact_text(str(exc)))
             verify_weights(task.model, profile, source, REGISTRY[task.model].versions())
-        except TrainingError as exc:
+        except (TrainingError, PipelineError) as exc:
             report.update(ready=False, reason=store.credentials.redact_text(str(exc)))
     elif task.model_run is not None:
         from ..evaluation.runner import inspect_checkpoint
@@ -359,6 +369,8 @@ def dispatch(request: WorkerRequest, credentials: Credentials, on_event: Progres
     result = preflight(store, task)
     if result["ready"] is not True:
         raise ExecutorError(str(result["reason"]))
+    if result.get("storage_ready") is False:
+        raise ExecutorError(str(result["storage_reason"]))
 
     with store.lock() as lease:
         previous = _read_json(store.directory / "job.json")

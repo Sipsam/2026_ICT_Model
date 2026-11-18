@@ -40,4 +40,8 @@ namespaces = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["e2e: local fixture-based CLI workflows", "real_data_smoke: opt-in real SMT training with staged weights"]
+markers = [
+    "e2e: local fixture-based CLI workflows",
+    "cpu_backend: real detector training with tiny synthetic datasets",
+    "real_data_smoke: opt-in real SMT training with staged weights",
+]

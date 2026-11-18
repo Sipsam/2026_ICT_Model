@@ -131,7 +131,7 @@ To run individual stages against a saved detector run, repeat the original model
 | `evaluate` | `metrics.json` and `model_reports/*.json` with the scored Validation metrics and prediction fingerprints. Pass the individual JSON reports to `ict compare`. |
 | `report` | `report.html` and `report.json` for the selected results. The CLI prints the HTML path. |
 
-Training resumes from each model's latest verified epoch checkpoint. The runner stores the underlying training attempts under `runs/<id>/recovery/train/`, including backend working files and the private YOLO dataset copy. A model without a verified recovery checkpoint needs a fresh approved attempt. Validation inference restarts its stage if interrupted. Published outputs use new attempt directories when a stage needs to be rebuilt.
+Training resumes from each model's latest verified epoch checkpoint. The runner stores the underlying attempts under `runs/<id>/recovery/train/`. By default this includes the private YOLO dataset copy. Set `ICT_TRAIN_CACHE_ROOT` on the machine doing the training to put the private copy and its caches on another volume. A model without a verified recovery checkpoint needs a fresh approved attempt. Validation inference restarts its stage if interrupted. Published outputs use new attempt directories when a stage needs to be rebuilt.
 
 ## Train detection models
 
@@ -160,6 +160,8 @@ For a one-epoch check with official weights and real AI Hub images, use the seal
 Copy the packaged [YOLO](src/ict_pipeline/models/yolo.yaml), [Faster R-CNN](src/ict_pipeline/models/faster_rcnn.yaml), or [RT-DETR](src/ict_pipeline/models/rt_detr.yaml) YAML to the directory specified by `--config-dir`. Name the files `yolo.yaml`, `faster_rcnn.yaml`, and `rt_detr.yaml` and supply one for each selected model. Each accepts `epochs`, `batch_size`, `image_size` (multiple of 32, at least 64), `optimizer` (`SGD`, `Adam`, or `AdamW`), `lr`, `seed`, `device`, `precision`, and `save_period` (0 disables periodic snapshots). The default device is CPU and `device: auto` checks for an available accelerator. YOLO uses private copies of the converted images and labels for its caches and JPEG checks. Both COCO adapters read the original converted files directly.
 
 `runs/training/<id>/<model>/run.json` records status, config, initialization, library and code versions, split and annotation fingerprints, the label policy, and relative paths and fingerprints for `best.pt` and `last.pt`. Pretrained runs also record source provenance, the verified weight hash, and the transfer diagnostics. A new run gets a new ID. To resume an unfinished model, pass `--resume-from <model-run-directory>`, the original dataset and config, and `--approve-train`. Keep the pinned pretrained file available for verification. Resume starts after the last saved epoch in a new directory. COCO checkpoints restore the model, optimizer and scaler and reconstruct the epoch seed. YOLO uses native training-state restoration from its EMA checkpoint and may produce a different trajectory from an uninterrupted run. Resume only from your own trusted runs because native Ultralytics checkpoints contain pickled objects.
+
+Use `ict train --dry-run` with the model and dataset options to see measured free space and estimated write requirements. Use `--runs-dir` to choose a checkpoint volume. Training checks available space before execution, during progress and before checkpoint commits. Treat checkpoint files as read-only. Byte-identical snapshots within a run can share filesystem storage. [Storage estimates, cache paths, and recovery](docs/artifact-management.md)
 
 The Python entry points are `ict_pipeline.models.contracts.ModelAdapter`, `TrainingRequest`, and `Checkpoints`, and `ict_pipeline.models.registry.REGISTRY`. The stage runner uses the same training implementation.
 
@@ -317,10 +319,12 @@ Use the process environment or copy `.env.example` to `.env` for credentials. A 
 
 ```text
 python -m pip install -e ".[test]"
-python -m pytest
+python -m pytest -m "not cpu_backend and not real_data_smoke"
 ```
 
-The tests generate tiny JPG, JSON, and XLSX fixtures in temporary directories and require no AI Hub dataset, credentials, GPU, or hosted runner. Run `python -m pytest -m e2e` for the fixture-based CLI journey. It covers mock acquisition and training, real preprocessing, checkpoint verification, prediction integrity, evaluation scoring, and report export. Run `python -m pytest tests/test_e2e.py -k actual_cpu_backend` to exercise each installed detector through the DAG with a one-epoch CPU fixture.
+The lightweight tests generate tiny JPG, JSON, and XLSX fixtures and require no AI Hub dataset, credentials, or GPU. Use `python -m pytest -m "e2e and not cpu_backend"` for fixture-based CLI workflows with mocked detectors. With training approval and the backend extras already installed, use `python -m pytest -m cpu_backend` to run real CPU training, checkpoint reload, interruption and resume, and DAG workflows for each installed detector.
+
+Set `ICT_TEST_ARTIFACT_ROOT` or use `--ict-artifact-root=D:/ict-test-storage` to move disposable test files off the Windows system drive. Pytest cleans up completed fixtures by default. Use `--ict-keep-failed` to retain failure diagnostics and `--ict-artifact-summary` to measure fixture bytes before cleanup. `ict clean --dry-run` previews registered sessions in the selected root. [Retention and exact-target cleanup](docs/artifact-management.md)
 
 See the [integration audit](docs/integration-audit.md) for executed checks, backend coverage, and the remaining work for a real-data model run.
 

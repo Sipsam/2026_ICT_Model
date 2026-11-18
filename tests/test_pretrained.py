@@ -20,7 +20,8 @@ from ict_pipeline.models.registry import Backend, REGISTRY
 from ict_pipeline.models.training import execute_training, plan_training
 from ict_pipeline.models.weights import LAYOUTS, checkpoint_source, load_weights, transfer_state, verify_weights
 from ict_pipeline.pipeline.store import digest_json
-from test_training import config_directory, detection, fake_torch, optional_runtime  # noqa: F401
+from test_training import config_directory, fake_torch, optional_runtime
+from test_training import detection as detection
 
 
 def pretrained_profile(directory: Path, name: ModelName, path: Path, *,
@@ -163,13 +164,13 @@ def test_transfer_checks_explicit_legacy_tensor_renames(tmp_path: Path) -> None:
     assert torch.equal(model.weight, source["legacy.weight"])
 
 
-@pytest.mark.parametrize("pretrained", [False, True])
+@pytest.mark.parametrize("mode", ["legacy_scratch", "pre_storage", "pretrained"])
 def test_revision_bound_resume_with_legacy_scratch_compatibility(
-    detection: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pretrained: bool,
+    detection: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
 ) -> None:
     name = ModelName.FASTER_RCNN
     folder = config_directory(tmp_path, epochs=2)
-    if pretrained:
+    if mode != "legacy_scratch":
         path = folder / "weight.pth"
         path.write_bytes(b"pinned")
         pretrained_profile(folder, name, path)
@@ -191,22 +192,23 @@ def test_revision_bound_resume_with_legacy_scratch_compatibility(
     with pytest.raises(KeyboardInterrupt):
         list(execute_training(first, lambda *_: None))
     previous = first.destination / name
-    if not pretrained:
+    contract_keys = (
+        "schema_version", "model", "architecture", "configuration", "device", "dataset_format",
+        "split_fingerprints", "annotation_fingerprint", "label_policy", "split_annotation_fingerprints",
+        "libraries", "ict_pipeline", "code_fingerprints", "python", "system", "machine", "checkpoint_format",
+        "library_license", "best_criterion", "dataset_revision", "profile_fingerprint",
+    )
+    if mode != "pretrained":
         path = previous / "run.json"
         metadata = json.loads(path.read_text())
-        # Reconstruct the earlier schema and its repository LF code fingerprint.
-        for key in ("initialization", "initialization_mode", "run_fingerprint"):
-            metadata.pop(key)
-        for key in ("initialization", "checkpoint", "fine_tuning", "freeze_backbone"):
-            del metadata["configuration"][key]
-        del metadata["code_fingerprints"]["weights.py"]
-        metadata["code_fingerprints"].update(training._LEGACY_SCRATCH_CHANGES[1])
-        contract_keys = (
-            "schema_version", "model", "architecture", "configuration", "device", "dataset_format",
-            "split_fingerprints", "annotation_fingerprint", "label_policy", "split_annotation_fingerprints",
-            "libraries", "ict_pipeline", "code_fingerprints", "python", "system", "machine", "checkpoint_format",
-            "library_license", "best_criterion", "dataset_revision", "profile_fingerprint",
-        )
+        if mode == "legacy_scratch":
+            for key in ("initialization", "checkpoint", "fine_tuning", "freeze_backbone"):
+                del metadata["configuration"][key]
+            del metadata["code_fingerprints"]["weights.py"]
+            metadata["code_fingerprints"].update(training._LEGACY_SCRATCH_CHANGES[1])
+        else:
+            metadata["code_fingerprints"].update(training.STORAGE_PREDECESSORS[-1])
+            contract_keys += ("pretrained_weights", "initialization_mode")
         metadata["run_fingerprint"] = digest_json({key: metadata[key] for key in contract_keys})
         path.write_text(json.dumps(metadata), encoding="utf-8")
     retry = plan_training(tmp_path, (name,), detection, Path("runs"), folder, previous)
@@ -217,6 +219,7 @@ def test_revision_bound_resume_with_legacy_scratch_compatibility(
     assert model == name and checkpoint.last.is_file()
 
 
+@pytest.mark.cpu_backend
 @pytest.mark.parametrize(("name", "file_format"), [
     (ModelName.YOLO, "ultralytics_pickle"), (ModelName.FASTER_RCNN, "state_dict"),
     (ModelName.RT_DETR, "safetensors"),

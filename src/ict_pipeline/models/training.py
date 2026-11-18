@@ -6,13 +6,14 @@ import os
 import platform
 from collections.abc import Iterator, Mapping
 from contextlib import ExitStack
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from hashlib import sha256
 from importlib import import_module
 from importlib.metadata import version
 from importlib.resources import files
 from pathlib import Path
 from shutil import copyfile
+from tempfile import TemporaryDirectory
 from time import monotonic
 from typing import Literal
 from uuid import uuid4
@@ -29,6 +30,9 @@ from ..data.preprocessing.revision import read_dataset_seal
 from ..pipeline.model import PipelineError
 from ..pipeline.store import RunStore, digest_json, fingerprint_path, timestamp
 from ..reporting.attempt import track_attempt
+from ..training_storage import (
+    CHECKPOINT_ALLOWANCE, cache_root, check_training_storage, guard_training_write, storage_estimates,
+)
 from .contracts import Checkpoints, ModelAdapter, ModelName, Progress, TrainConfig, TrainingError, TrainingRequest
 from .dataset import DetectionData, inspect_data, verify_shared_labels
 from .registry import REGISTRY, failure_message, resolve_device
@@ -54,6 +58,24 @@ _LEGACY_SCRATCH_CHANGES = ({
     "yolo.py": "91971c5ff40ad52fc46e4e98b161413518de028c36af99a5db8058197f97a781",
 })
 
+# Exact predecessors for storage-only changes, including Windows checkout bytes.
+STORAGE_PREDECESSORS = ({
+    "coco.py": "bfba3786944e3b1afb2d61b2d78bfd4bbc9a650a7c60286675b48ba3a7ad6059",
+    "contracts.py": "8cddd503fc88c92d7c2168446db6fd2e09cac278efcf0c838cf8f855a7b9c7a4",
+    "training.py": "dc8b9c6678f41b3c97a18d4cc2c64baa5700ad4b20ab8999e918ff14e55d8173",
+    "yolo.py": "5a49c5005b6cb24a1c3e0f74d56f29b5f9b76099a4857f40ee27e4146b21eb09",
+}, {
+    "coco.py": "5f79b10022329e47b9a21fa7d490f8a8691a852160ca9bbfc4682d344130d9d9",
+    "contracts.py": "2e1adc99a96bbe958ba9f203fb7d629f52d0de154906e54d47e1a64e1de69232",
+    "training.py": "434177bd7d09fa03f65a83058ef65e468a6daa3e15b605ad6970d52dff27e934",
+    "yolo.py": "7705417465f9bb5faadc17b06799967505901eaf12938fc05b2675fff78e6559",
+}, {
+    "coco.py": "3cce1555978745da9e619e8ff994bd5569a36f46934cb8e6ab27470f2715f134",
+    "contracts.py": "af490150a21f1579ce9641ef499e5d3c040e12ec8d7bf45edbea177488fbd61b",
+    "training.py": "66456f5c256f832cee32faadcde9530d12d1f07be37a1df8c81a0c2f9014b023",
+    "yolo.py": "ef4f03d3c6aa8ffa8be604f66b5a78df6c0598fafac754a347eae6b7824dd732",
+})
+
 
 @dataclass(frozen=True)
 class TrainingPlan:
@@ -67,6 +89,7 @@ class TrainingPlan:
     profile_fingerprint: str | None = None
     verified_data: Mapping[str, DetectionData] | None = None
     weight_sources: Mapping[ModelName, Path] = field(default_factory=dict)
+    publish_checkpoints: bool = False
 
 
 def read_training_profile(
@@ -143,7 +166,7 @@ def _records(output: Path, checkpoints: Checkpoints) -> dict[str, dict[str, str]
 
 
 def _resume_checkpoint(
-    name: ModelName, source: Path, output: Path, expected: set[str], *, verified: bool,
+    name: ModelName, source: Path, folder: Path, expected: set[str], *, verified: bool,
 ) -> tuple[Checkpoints, dict[str, object]]:
     # The original run remains intact. Hold its lock while checking/copying checkpoints.
     with RunStore(source.parent, source.name).lock():
@@ -162,10 +185,9 @@ def _resume_checkpoint(
             records = _records(source, paths)
             if (verified or metadata.get("checkpoints")) and metadata.get("checkpoints") != records:
                 raise TrainingError("A saved checkpoint has changed since the previous run ended.")
-            folder = output / "resume"
-            folder.mkdir()
             for path in (paths.last, paths.best):
                 if path.is_file():
+                    guard_training_write(folder, path.stat().st_size)
                     copyfile(path, folder / path.name)
             return Checkpoints(folder / "best.pt", folder / "last.pt"), metadata
         except (OSError, ValueError, TypeError, AttributeError):
@@ -173,6 +195,8 @@ def _resume_checkpoint(
 
 
 def execute_training(plan: TrainingPlan, progress: Progress) -> Iterator[tuple[ModelName, Checkpoints]]:
+    estimates = storage_estimates(plan)
+    check_training_storage(estimates)
     plan.destination.mkdir(parents=True, exist_ok=False)
     store = RunStore(plan.destination.parent, plan.destination.name, plan.credentials)
     configuration = {
@@ -186,7 +210,7 @@ def execute_training(plan: TrainingPlan, progress: Progress) -> Iterator[tuple[M
         attempt.enter_context(track_attempt(
             store, plan.workspace, "training", configuration, packages, (TrainingError, SetupError, PipelineError),
         ))
-        store.log({"time": timestamp(), "stage": "training preflight"})
+        store.log({"time": timestamp(), "stage": "training preflight", "storage": [asdict(item) for item in estimates]})
         for index, result in enumerate(_execute_training(plan, progress), 1):
             if index == len(plan.models):
                 attempt.close()
@@ -277,6 +301,11 @@ def _train_model(
         }
     metadata["initialization_mode"] = config.initialization
     run_fingerprint = digest_json(metadata)
+    if plan.resume_from:
+        resume_fingerprints.update(
+            digest_json({**metadata, "code_fingerprints": {**code, **changes}})
+            for changes in STORAGE_PREDECESSORS
+        )
     resume_fingerprints.add(run_fingerprint)
     metadata.update({
         "run_fingerprint": run_fingerprint,
@@ -289,12 +318,19 @@ def _train_model(
     checkpoints = checkpoint_paths(name, output)
     verified_resume = plan.dataset_revision is not None or weights is not None
     store = RunStore(output.parent, name, plan.credentials)
+    scratch = cache_root(plan) if name == ModelName.YOLO else None
     with store.lock():
         last_logged = 0.0
+        last_storage_check = float("-inf")
 
         def report(stage: str, done: int, total: int) -> None:
-            nonlocal last_logged
+            nonlocal last_logged, last_storage_check
             now = monotonic()
+            if now - last_storage_check >= 1:
+                guard_training_write(output)
+                if scratch is not None:
+                    guard_training_write(scratch)
+                last_storage_check = now
             if done in (0, total) or now - last_logged >= 1:
                 store.log({
                     "time": timestamp(), "stage": stage, "completed": done, "total": total,
@@ -302,6 +338,11 @@ def _train_model(
                 })
                 last_logged = now
             progress(f"{name} {plan.credentials.redact_text(stage)}", done, total)
+
+        def check_checkpoint_space() -> None:
+            measured = checkpoints.last.stat().st_size if checkpoints.last.is_file() else 0
+            copies = 2 if name == ModelName.YOLO else 1
+            guard_training_write(output, copies * max(measured, CHECKPOINT_ALLOWANCE[name]))
 
         def record_metrics(values: Mapping[str, float]) -> None:
             metrics = {key: value for key, value in values.items() if math.isfinite(value)}
@@ -317,25 +358,29 @@ def _train_model(
 
         store.write_json("run.json", metadata)
         try:
-            resume = None
-            saved: dict[str, object] = {}
-            if plan.resume_from:
-                resume, saved = _resume_checkpoint(
-                    name, plan.resume_from, output, resume_fingerprints, verified=verified_resume,
-                )
-                if weights is not None and isinstance(saved.get("weight_transfer"), dict):
-                    record_transfer(saved["weight_transfer"])
-            report(f"starting on {device}", 0, config.epochs)
-            if resume and verified_resume and saved.get("checkpoint_epoch") == config.epochs:
-                checkpoints.last.parent.mkdir(parents=True, exist_ok=True)
-                copyfile(resume.best, checkpoints.best)
-                copyfile(resume.last, checkpoints.last)
-                metadata.update(metrics=saved["metrics"], checkpoint_epoch=saved["checkpoint_epoch"])
-                result = checkpoints
-            else:
-                result = adapter.train(TrainingRequest(
-                    config, data, output, device, report, resume, record_metrics, weights, record_transfer,
-                ))
+            with ExitStack() as staged:
+                resume = None
+                saved: dict[str, object] = {}
+                if plan.resume_from:
+                    folder = Path(staged.enter_context(TemporaryDirectory(prefix="resume-", dir=output)))
+                    resume, saved = _resume_checkpoint(
+                        name, plan.resume_from, folder, resume_fingerprints, verified=verified_resume,
+                    )
+                    if weights is not None and isinstance(saved.get("weight_transfer"), dict):
+                        record_transfer(saved["weight_transfer"])
+                report(f"starting on {device}", 0, config.epochs)
+                if resume and verified_resume and saved.get("checkpoint_epoch") == config.epochs:
+                    guard_training_write(output, resume.best.stat().st_size + resume.last.stat().st_size)
+                    checkpoints.last.parent.mkdir(parents=True, exist_ok=True)
+                    copyfile(resume.best, checkpoints.best)
+                    copyfile(resume.last, checkpoints.last)
+                    metadata.update(metrics=saved["metrics"], checkpoint_epoch=saved["checkpoint_epoch"])
+                    result = checkpoints
+                else:
+                    result = adapter.train(TrainingRequest(
+                        config, data, output, device, report, resume, record_metrics, weights, record_transfer,
+                        scratch, check_checkpoint_space,
+                    ))
             if result != checkpoints or len(_records(output, result)) != 2:
                 raise TrainingError("Training did not produce both best and last checkpoints.")
             if plan.dataset_revision is not None:

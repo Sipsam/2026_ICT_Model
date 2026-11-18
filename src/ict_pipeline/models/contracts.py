@@ -111,6 +111,8 @@ class TrainingRequest:
     record_metrics: Callable[[Mapping[str, float]], None] = lambda _: None
     pretrained: VerifiedWeights | None = None
     record_transfer: Callable[[Mapping[str, object]], None] = lambda _: None
+    cache_root: Path | None = None
+    check_checkpoint_space: Callable[[], None] = lambda: None
 
 
 class ModelAdapter(Protocol):

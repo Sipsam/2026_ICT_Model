@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from time import sleep
+from time import monotonic, sleep
 from typing import Annotated, BinaryIO, Literal
 
 from pydantic import BaseModel, Field, ValidationError
@@ -105,14 +105,17 @@ class RunStore:
         _reject_link(self.directory)
 
     @contextmanager
-    def lock(self) -> Iterator[BinaryIO]:
+    def lock(self, *, wait_seconds: float = 0) -> Iterator[BinaryIO]:
         self.directory.mkdir(parents=True, exist_ok=True)
         _reject_link(self.lock_path)
         # Leave the lock file in place. The OS releases the lock when the
         # descriptor closes, including when the owning process is killed.
         with self.lock_path.open("a+b") as stream:
-            if not _try_lock(stream):
-                raise PipelineError(f"Run {self.run_id} is active. Inspect it with ict status.")
+            deadline = monotonic() + wait_seconds
+            while not _try_lock(stream):
+                if monotonic() >= deadline:
+                    raise PipelineError(f"Run {self.run_id} is active. Inspect it with ict status.")
+                sleep(0.02)
             yield stream
 
     def read(self) -> RunState | None:

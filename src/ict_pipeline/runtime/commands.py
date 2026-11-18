@@ -118,7 +118,7 @@ def preflight(
         _print(result)
     except (*_SAFE_ERRORS, ValidationError, OSError, ValueError, RuntimeError) as exc:
         _failure(exc)
-    if not result["ready"]:
+    if not result["ready"] or result.get("storage_ready") is False:
         raise typer.Exit(1)
 
 
