@@ -187,6 +187,7 @@ class SQLiteInspectionRepository:
             ("i.created_at >= ?", utc_timestamp(filters.created_from) if filters.created_from is not None else None),
             ("i.created_at < ?", utc_timestamp(filters.created_before) if filters.created_before is not None else None),
             ("i.status = ?", filters.status),
+            ("i.inspection_id = ?", filters.inspection_id.hex if filters.inspection_id is not None else None),
             ("i.mode = ?", filters.mode if filters.mode != "all" else None),
             ("i.model_id = ?", filters.model_id),
             ("i.detector_model = ?", filters.model),

@@ -97,7 +97,8 @@ class FileInspectionRepository:
                 yield inspection_id
 
     def _matching(self, filters: HistoryFilter, cutoff: datetime | None) -> Iterator[StoredInspection]:
-        for inspection_id in self.record_ids():
+        ids = (filters.inspection_id,) if filters.inspection_id is not None else self.record_ids()
+        for inspection_id in ids:
             record = self.read_record(inspection_id)
             if record is not None and matches(record, filters, cutoff):
                 yield record

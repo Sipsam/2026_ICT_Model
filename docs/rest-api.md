@@ -11,6 +11,8 @@ python -m ict_pipeline.api
 
 The launcher binds to `127.0.0.1:8000` and starts one worker. It serves the interactive OpenAPI UI at `http://127.0.0.1:8000/docs` and the JSON specification at `/openapi.json`. The specification includes multipart request examples and structured errors. The default model IDs are `mock-empty` and `mock-defect`. Mock mode runs on CPU with Pillow and needs no model weights or dataset.
 
+The [inspection dashboard](inspection-dashboard.md) is available at `http://127.0.0.1:8000/dashboard` on a loopback bind. It reads the same history and statistics API as other clients.
+
 ## Routes
 
 | Method and path | Successful response |
@@ -20,6 +22,7 @@ The launcher binds to `127.0.0.1:8000` and starts one worker. It serves the inte
 | `POST /v1/inspections` | `201` with a stored result and a relative `Location` header. |
 | `POST /v1/inspections/batch` | `200` with one item per upload, in upload order, including per-item status and a stored inspection or error. |
 | `GET /v1/inspections/{inspection_id}` | `200` with the stored result for a server-issued UUID. |
+| `GET /v1/inspections/{inspection_id}/image` | `200` with the original JPEG or PNG bytes when a matching original is staged under the configured `image_root`. |
 | `GET /v1/inspections` | `200` with a page of stored inspections and the total matching count. |
 | `GET /v1/inspections/export` | `200` with a downloadable JSON or CSV page. |
 | `GET /v1/statistics/summary` | `200` with inspection and detection totals and inspection counts by status and model ID. |
@@ -127,6 +130,7 @@ All history and statistics routes accept these filters. Combine them to narrow t
 | `model_id` | Public model ID used for the inspection. It can be an ID from a previous configuration. |
 | `model` | Detector family, one of `yolo`, `faster_rcnn`, or `rt_detr`. Mock records have no detector family. |
 | `mode` | `real`, `mock`, or `all`. Statistics default to `real`. History and export default to `all`. |
+| `inspection_id` | Exact version 4 inspection UUID. Combines with the other filters. |
 
 List and export accept `order=newest|oldest` (default `newest`), `limit` (1–500, default 100), and zero-based `offset` (default 0). Rows are ordered by UTC creation time and then inspection ID in the same direction. The JSON page has `schema_version: 1`, `total`, `limit`, `offset`, and `items` containing ordinary stored inspections. `total` counts matching inspections before pagination. Offset pages may shift between requests as new records arrive or old ones expire. Set a fixed upper time bound when paging through live history.
 
@@ -211,7 +215,9 @@ The default file repository publishes one versioned JSON record per successful i
 
 Select `storage_backend: "sqlite"` for indexed history and aggregate queries. The SQLite file lives under `storage_root` and uses `database_name`, which defaults to `inspections.sqlite3`. Existing JSON files can be imported explicitly. With a configured retention period, expired records return `404` and are omitted from history, statistics, and exports. For backup, restoration, migration, and opt-in batch removal of expired SQLite rows, see the [inspection database guide](inspection-database.md).
 
-Without a token the server requires a loopback peer, loopback Host header, and same-origin browser requests. Set a strong `ICT_API_TOKEN` in the process environment to require bearer auth on every route, including the OpenAPI endpoints. The launcher requires a token for non-loopback binds. For token-protected OpenAPI, fetch `/openapi.json` with an authenticated client. Keep the server off public networks unless it sits behind TLS, authenticated access controls, and rate limits. The built-in bearer token grants access to the entire model catalog and result store. For shared deployment, use an authenticated gateway with appropriate per-user authorization, disable raw access logs, and keep direct access to the application private.
+Without a token the server requires a loopback peer, loopback Host header, and same-origin browser requests. Set a strong `ICT_API_TOKEN` in the process environment to require bearer auth on the API, including stored results, images, exports, and OpenAPI. The dashboard shell and its fixed static assets require a loopback bind, peer, and Host, with the same Origin check as the local API. In token mode the shell opens locally and the browser sends the supplied token on each API call. The launcher requires a token for non-loopback binds. For token-protected OpenAPI, fetch `/openapi.json` with an authenticated client. Keep the server off public networks unless it sits behind TLS, authenticated access controls, and rate limits. The built-in bearer token grants access to the entire model catalog and result store. For shared deployment, use an authenticated gateway with appropriate per-user authorization, disable raw access logs, and keep direct access to the application private.
+
+Image retrieval is opt-in through the server-owned `image_root` setting. It looks up a visible inspection by UUID, takes the hash and format from its validated image descriptor, and checks the staged bytes against the stored hash, format, and dimensions. Use a private, administrator-controlled directory. The route accepts no filesystem location from the client and returns `404 inspection_image_unavailable` for unstaged or mismatched images. Unknown or expired inspections return `404 inspection_not_found`. See [staging original images](inspection-dashboard.md#original-images).
 
 ## Python integration and tests
 

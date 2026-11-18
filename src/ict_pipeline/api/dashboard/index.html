@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Inspection Dashboard · ICT</title>
+  <link rel="stylesheet" href="/dashboard/dashboard.css">
+  <script type="module" src="/dashboard/dashboard.mjs"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#main"><span>ICT</span> Inspection</a>
+      <nav aria-label="Dashboard">
+        <a href="#overview">Overview</a>
+        <a href="#history">History</a>
+      </nav>
+      <span class="service-label">Local dashboard</span>
+    </div>
+  </header>
+  <main id="main" tabindex="-1">
+    <div class="intro">
+      <div><h1>Inspection dashboard</h1><p>Monitor inspection outcomes and review individual detections.</p></div>
+      <span id="mode-label" class="badge">Real inspections</span>
+    </div>
+    <form id="filters" class="panel filters" aria-label="Dashboard filters">
+      <div class="filter-grid">
+        <label>Data view
+          <select name="mode"><option value="real">Real inspections</option><option value="mock">Simulated inspections</option></select>
+        </label>
+        <label>From (UTC)<input name="from" type="date" required></label>
+        <label>Through (UTC)<input name="through" type="date" required></label>
+        <label>Status
+          <select name="status"><option value="">All statuses</option><option value="defect_detected">Defect detected</option>
+            <option value="review_required">Review required</option><option value="inference_failed">Inference failed</option><option value="pass">Pass</option></select>
+        </label>
+        <label>Defect class
+          <select name="defect_class"><option value="">All classes</option><option>cold_solder</option><option>misalignment</option>
+            <option>short</option><option>missing_component</option><option>tombstone</option></select>
+        </label>
+        <label>Detector family
+          <select name="model"><option value="">All families</option><option>yolo</option><option>faster_rcnn</option><option>rt_detr</option></select>
+        </label>
+        <label>Model ID<input name="model_id" type="search" placeholder="Exact model ID" maxlength="64" pattern="[a-z0-9][a-z0-9_\-]{0,63}"></label>
+        <label class="id-filter">Inspection ID<input name="inspection_id" type="search" placeholder="Exact inspection UUID" maxlength="36" autocomplete="off"></label>
+      </div>
+      <div class="filter-actions">
+        <button id="apply" class="primary" type="submit" disabled>Apply filters</button>
+        <button id="refresh" type="button" disabled>Refresh data</button>
+        <label class="inline-label">Auto-refresh
+          <select id="interval"><option value="0">Off</option><option value="60">1 minute</option><option value="120">2 minutes</option>
+            <option value="300">5 minutes</option></select>
+        </label>
+        <details class="access">
+          <summary>API access</summary>
+          <label>Bearer token<input id="token" type="password" autocomplete="off" spellcheck="false"></label>
+          <span>Use Apply filters to connect with this token.</span>
+        </details>
+      </div>
+      <p id="filter-feedback" class="notice" role="alert" hidden></p>
+    </form>
+    <noscript><p class="notice">Enable JavaScript to load the dashboard.</p></noscript>
+    <section id="overview" aria-labelledby="overview-title">
+      <div class="section-heading"><h2 id="overview-title">Overview</h2><span id="updated" class="muted"></span></div>
+      <p id="overview-feedback" class="notice" role="status">Loading statistics…</p>
+      <div id="charts" hidden>
+        <div class="totals">
+          <article class="panel metric"><h3>Total inspections</h3><strong id="inspection-total"></strong><span>Inspection records</span></article>
+          <article class="panel metric"><h3>Total detections</h3><strong id="detection-total"></strong><span>Retained bounding boxes</span></article>
+        </div>
+        <div class="chart-grid">
+          <article class="panel chart trend-card"><h3>Daily inspection trend</h3><p>Inspections per UTC day</p><div id="trend"></div></article>
+          <article class="panel chart"><h3>Inspection status</h3><p>Inspections by outcome</p><div id="statuses"></div></article>
+          <article class="panel chart"><h3>Defect distribution</h3><p>Detections by class with matching inspection counts</p><div id="defects"></div></article>
+          <article class="panel chart"><h3>Detector models</h3><p>Inspections by public model ID</p><div id="models"></div></article>
+        </div>
+      </div>
+    </section>
+    <section id="history" aria-labelledby="history-title">
+      <div class="section-heading"><h2 id="history-title">Inspection history</h2><span id="page-version" class="muted"></span></div>
+      <div class="panel history-panel">
+        <div class="history-controls">
+          <label class="inline-label">Sort
+            <select id="order"><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select>
+          </label>
+          <label class="inline-label">Rows
+            <select id="limit"><option value="25">25</option><option value="50">50</option><option value="100">100</option></select>
+          </label>
+          <div class="exports" aria-label="Export current page">
+            <span>Export page</span><button id="csv" type="button" disabled>CSV</button><button id="json" type="button" disabled>JSON</button>
+          </div>
+        </div>
+        <p id="history-feedback" class="notice" role="status">Loading history…</p>
+        <p id="export-feedback" class="notice" role="status" hidden></p>
+        <div id="table-wrap" class="table-wrap" hidden>
+          <table>
+            <caption class="visually-hidden">Inspections matching the active filters</caption>
+            <thead><tr><th scope="col">Created (UTC)</th><th scope="col">Request / Source</th><th scope="col">Status</th>
+              <th scope="col">Model</th><th scope="col" class="numeric">Detections</th><th scope="col">Details</th></tr></thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+        <div class="pagination">
+          <span id="page-label" role="status"></span>
+          <div><button id="previous" type="button" disabled>Previous</button><button id="next" type="button" disabled>Next</button></div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <dialog id="detail" aria-labelledby="detail-title">
+    <div class="dialog-heading"><h2 id="detail-title">Inspection details</h2><button id="close-detail" type="button" autofocus>Close</button></div>
+    <div id="detail-content" class="dialog-content" aria-live="polite"></div>
+  </dialog>
+</body>
+</html>

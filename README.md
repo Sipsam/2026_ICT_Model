@@ -212,6 +212,8 @@ python -m ict_pipeline.api
 
 The server defaults to `http://127.0.0.1:8000` with two explicitly simulated models and requires no detector weights for mock mode. Submit JPEG or PNG images singly or in batches and retrieve stored results by ID. Use the [REST API guide](docs/rest-api.md) for curl and Python examples, OpenAPI, trusted model configuration, and deployment limits.
 
+Open [the local dashboard](http://127.0.0.1:8000/dashboard) to view inspection counts and trends, filter history, export a page, and review detection boxes on available originals. The dashboard starts with real inspections. Select **Simulated inspections** and apply the filters to review mock submissions. See the [inspection dashboard guide](docs/inspection-dashboard.md) for image setup, filters, and access controls.
+
 The API also lists and filters inspection history, exports JSON or CSV, and reports UTC daily counts and defect frequencies. Statistics count real inspections by default. The file repository remains the default. Set `"storage_backend": "sqlite"` in the JSON file selected by `ICT_API_CONFIG` to use indexed SQLite history. The API and CLI share this configuration.
 
 ```text

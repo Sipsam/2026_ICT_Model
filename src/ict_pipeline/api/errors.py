@@ -11,6 +11,7 @@ ERRORS: dict[str, tuple[int, str]] = {
     "not_found": (404, "The requested resource was not found."),
     "model_not_found": (404, "The selected model is not configured."),
     "inspection_not_found": (404, "The inspection is unknown or has expired."),
+    "inspection_image_unavailable": (404, "The original inspection image is unavailable."),
     "method_not_allowed": (405, "The HTTP method is not supported for this resource."),
     "upload_timeout": (408, "The upload did not finish within the configured time."),
     "request_too_large": (413, "The multipart request exceeds the configured byte limit."),

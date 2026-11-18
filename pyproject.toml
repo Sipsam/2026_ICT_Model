@@ -39,6 +39,7 @@ namespaces = false
 "ict_pipeline.config" = ["default.yaml"]
 "ict_pipeline.data" = ["aihub_smt.yaml"]
 "ict_pipeline.models" = ["*.yaml"]
+"ict_pipeline.api.dashboard" = ["*.html", "*.css", "*.mjs"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -21,6 +21,8 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ..config.settings import Credentials
 from ..evaluation.adapters import PredictorFactory
+from ..inspection.service import local_path
+from .dashboard_routes import ASSETS, router as dashboard_router
 from .errors import APIError
 from .repository import InspectionRepository
 from .routes import router
@@ -33,15 +35,16 @@ logger = logging.getLogger(__name__)
 
 
 class RequestMiddleware:
-    def __init__(self, app: ASGIApp, *, capacity: int, token: str) -> None:
+    def __init__(self, app: ASGIApp, *, capacity: int, token: str, local_dashboard: bool) -> None:
         self.app = app
         self.capacity = capacity
         self.token = token.encode("ascii")
+        self.local_dashboard = local_dashboard
         self.active = 0
 
-    def _authorize(self, scope: Scope) -> None:
+    def _authorize(self, scope: Scope, *, dashboard_asset: bool) -> None:
         headers = Headers(scope=scope)
-        if self.token:
+        if self.token and not dashboard_asset:
             scheme, _, value = headers.get("authorization", "").partition(" ")
             if scheme.lower() != "bearer" or not compare_digest(value.encode("latin-1"), self.token):
                 raise APIError("unauthorized")
@@ -53,7 +56,8 @@ class RequestMiddleware:
             peer = scope.get("client")
             host = headers.get("host")
             origin = headers.get("origin")
-            if (not peer or not is_loopback(peer[0]) or not host or not is_loopback(hostname)
+            if ((dashboard_asset and not self.local_dashboard)
+                    or not peer or not is_loopback(peer[0]) or not host or not is_loopback(hostname)
                     or (origin is not None and origin != f"{scope['scheme']}://{host}")):
                 raise APIError("local_access_required")
 
@@ -77,11 +81,13 @@ class RequestMiddleware:
             await send(message)
 
         try:
-            self._authorize(scope)
-            if self.active >= self.capacity:
-                raise APIError("busy")
-            self.active += 1
-            admitted = True
+            dashboard_asset = scope["method"] == "GET" and scope["path"] in ASSETS
+            self._authorize(scope, dashboard_asset=dashboard_asset)
+            if not dashboard_asset:
+                if self.active >= self.capacity:
+                    raise APIError("busy")
+                self.active += 1
+                admitted = True
             await self.app(scope, receive, send_with_id)
         except APIError as exc:
             await exc.response(request_id)(scope, receive, send_with_id)
@@ -122,6 +128,8 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             root = storage_root(settings, credentials)
+            image_root = (local_path(settings.image_root, Path.cwd(), credentials)
+                          if settings.image_root is not None else None)
             root.mkdir(mode=0o700, parents=True, exist_ok=True)
             store = repository if repository is not None else await run_in_threadpool(
                 open_repository, settings, credentials,
@@ -136,6 +144,7 @@ def create_app(
             models = await run_in_threadpool(ModelManager, settings, scratch, credentials, predictor_factory)
             inspections = InspectionAPI(settings, models, store, scratch)
             app.state.inspections = inspections
+            app.state.inspection_image_root = image_root
             try:
                 yield
             finally:
@@ -143,12 +152,17 @@ def create_app(
                     await inspections.close()
                 finally:
                     del app.state.inspections
+                    del app.state.inspection_image_root
 
     app = FastAPI(
         title="ICT Inspection API", version="1.0.0", lifespan=lifespan, redirect_slashes=False,
     )
-    app.add_middleware(RequestMiddleware, capacity=settings.max_concurrent_requests, token=token)
+    app.add_middleware(
+        RequestMiddleware, capacity=settings.max_concurrent_requests, token=token,
+        local_dashboard=is_loopback(settings.host),
+    )
     app.include_router(router)
+    app.include_router(dashboard_router)
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request: Request, _: RequestValidationError) -> JSONResponse:

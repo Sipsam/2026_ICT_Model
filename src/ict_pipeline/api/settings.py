@@ -51,6 +51,7 @@ class APISettings(Contract):
     storage_backend: Literal["file", "sqlite"] = "file"
     database_name: str = "inspections.sqlite3"
     model_root: Path = Path("runs/training")
+    image_root: Path | None = None
     models: dict[ModelID, ModelSpec] = Field(default_factory=lambda: {
         "mock-empty": MockModel(mode="mock"),
         "mock-defect": MockModel(mode="mock", scenario="defect"),

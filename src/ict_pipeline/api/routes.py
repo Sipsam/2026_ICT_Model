@@ -8,6 +8,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Request, Response
 from pydantic import UUID4
+from starlette.concurrency import run_in_threadpool
 
 from .errors import APIError, ERRORS
 from .history import (
@@ -21,6 +22,7 @@ from .history import (
     TrendStatistics,
 )
 from .history_export import write_history
+from .inspection_images import original_image
 from .schemas import BatchDetails, BatchResponse, ErrorResponse, Health, ModelsResponse, SingleDetails, StoredInspection
 from .services import InspectionAPI, Upload
 from .uploads import read_form, read_image, split_form
@@ -183,3 +185,19 @@ def statistics_trends(request: Request, query: Annotated[StatisticsFilter, Query
 @router.get("/v1/inspections/{inspection_id}", responses={**AUTH_ERRORS, **_errors(404, 422, 503)})
 async def get_inspection(request: Request, inspection_id: UUID4) -> StoredInspection:
     return await _api(request).get(inspection_id)
+
+
+@router.get("/v1/inspections/{inspection_id}/image", response_class=Response, responses={
+    **AUTH_ERRORS, **_errors(404, 422, 503),
+    200: {"content": {kind: {"schema": {"type": "string", "format": "binary"}}
+                      for kind in ("image/jpeg", "image/png")}},
+})
+async def get_inspection_image(request: Request, inspection_id: UUID4) -> Response:
+    record = await _api(request).get(inspection_id)
+    data, media_type = await run_in_threadpool(
+        original_image, request.app.state.inspection_image_root, record.result.image,
+    )
+    return Response(data, media_type=media_type, headers={
+        "X-Content-Type-Options": "nosniff",
+        "Cross-Origin-Resource-Policy": "same-origin",
+    })
