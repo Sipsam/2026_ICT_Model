@@ -32,7 +32,7 @@ def _json(value: object) -> str:
     return json.dumps(value, allow_nan=False, separators=(",", ":"), sort_keys=True)
 
 
-def _csv_id(value: str | None) -> str | None:
+def csv_identifier(value: str | None) -> str | None:
     return "'" + value if value and value[0] in "=+-@" else value
 
 
@@ -54,10 +54,10 @@ def write_records(output: Path, records: Iterable[InspectionResult]) -> bool:
             image = record.image
             provenance = record.provenance
             writer.writerow((
-                record.schema_version, _csv_id(record.request_id), _csv_id(record.source_id), record.input_line,
+                record.schema_version, csv_identifier(record.request_id), csv_identifier(record.source_id), record.input_line,
                 provenance.mode, provenance.model, provenance.mock_scenario, provenance.checkpoint_fingerprint,
                 record.outcome, record.reason, image.sha256 if image else None, image.width if image else None,
-                image.height if image else None, _csv_id(record.sensor_source_id), record.thresholds.confidence,
+                image.height if image else None, csv_identifier(record.sensor_source_id), record.thresholds.confidence,
                 record.thresholds.nms_iou, len(record.detections), _json(encoded["detections"]),
             ))
             complete = complete and record.outcome != "inference_failed"

@@ -1,12 +1,26 @@
 """Version 1 HTTP routes for the inspection service."""
 
 import json
-from typing import Any
+from collections.abc import Iterator
+from contextlib import contextmanager
+from io import StringIO
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Query, Request, Response
 from pydantic import UUID4
 
 from .errors import APIError, ERRORS
+from .history import (
+    DefectStatistics,
+    ExportQuery,
+    HistoryPage,
+    HistoryQuery,
+    InspectionHistory,
+    StatisticsFilter,
+    StatisticsSummary,
+    TrendStatistics,
+)
+from .history_export import write_history
 from .schemas import BatchDetails, BatchResponse, ErrorResponse, Health, ModelsResponse, SingleDetails, StoredInspection
 from .services import InspectionAPI, Upload
 from .uploads import read_form, read_image, split_form
@@ -32,6 +46,7 @@ def _errors(*statuses: int) -> dict[int, dict[str, Any]]:
 
 AUTH_ERRORS = _errors(401, 403, 429, 500)
 UPLOAD_ERRORS = _errors(400, 404, 408, 413, 415, 422, 503, 504)
+HISTORY_ERRORS = {**AUTH_ERRORS, **_errors(422, 503)}
 
 
 def _multipart_schema(*, batch: bool) -> dict[str, Any]:
@@ -50,6 +65,17 @@ def _multipart_schema(*, batch: bool) -> dict[str, Any]:
 
 def _api(request: Request) -> InspectionAPI:
     return request.app.state.inspections
+
+
+@contextmanager
+def _history(request: Request) -> Iterator[InspectionHistory]:
+    repository = _api(request).repository
+    if not isinstance(repository, InspectionHistory):
+        raise APIError("history_unavailable")
+    try:
+        yield repository
+    except (OSError, ValueError):
+        raise APIError("storage_unavailable") from None
 
 
 @router.get("/health", responses={**AUTH_ERRORS, **_errors(503)})
@@ -109,6 +135,49 @@ async def inspect_batch(request: Request) -> BatchResponse:
     finally:
         await form.close()
     return BatchResponse(items=await api.inspect(details.model_id, uploads))
+
+
+@router.get("/v1/inspections", responses=HISTORY_ERRORS)
+def list_inspections(request: Request, query: Annotated[HistoryQuery, Query()]) -> HistoryPage:
+    with _history(request) as history:
+        return history.list(query)
+
+
+@router.get("/v1/inspections/export", response_model=HistoryPage, responses={
+    **HISTORY_ERRORS, 200: {"content": {"text/csv": {"schema": {"type": "string"}}}},
+})
+def export_inspections(request: Request, query: Annotated[ExportQuery, Query()]) -> HistoryPage | Response:
+    with _history(request) as history:
+        page = history.list(query)
+    headers = {
+        "Content-Disposition": f'attachment; filename="history.{query.format}"',
+        "X-Total-Count": str(page.total),
+        "X-Limit": str(page.limit),
+        "X-Offset": str(page.offset),
+    }
+    if query.format == "json":
+        return Response(page.model_dump_json(), media_type="application/json", headers=headers)
+    output = StringIO(newline="")
+    write_history(output, page.items, "csv")
+    return Response(output.getvalue(), media_type="text/csv", headers=headers)
+
+
+@router.get("/v1/statistics/summary", responses=HISTORY_ERRORS)
+def statistics_summary(request: Request, query: Annotated[StatisticsFilter, Query()]) -> StatisticsSummary:
+    with _history(request) as history:
+        return history.summary(query)
+
+
+@router.get("/v1/statistics/defects", responses=HISTORY_ERRORS)
+def statistics_defects(request: Request, query: Annotated[StatisticsFilter, Query()]) -> DefectStatistics:
+    with _history(request) as history:
+        return history.defects(query)
+
+
+@router.get("/v1/statistics/trends", responses=HISTORY_ERRORS)
+def statistics_trends(request: Request, query: Annotated[StatisticsFilter, Query()]) -> TrendStatistics:
+    with _history(request) as history:
+        return history.trends(query)
 
 
 @router.get("/v1/inspections/{inspection_id}", responses={**AUTH_ERRORS, **_errors(404, 422, 503)})

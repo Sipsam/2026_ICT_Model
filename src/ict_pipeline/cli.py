@@ -14,6 +14,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from .api.history_commands import history_app
 from .config.settings import SetupError, merge_settings, validate_settings
 from .data.commands import data_app, dataset_paths, provider_for, show_download_plan
 from .data.ingestion import Acquisition, has_dataset
@@ -49,6 +50,7 @@ app.add_typer(integrity_app, name="integrity")
 app.add_typer(runs_app, name="runs")
 app.add_typer(runtime_app, name="runtime")
 app.add_typer(pilot_app, name="pilot")
+app.add_typer(history_app, name="history")
 app.command("recommend")(recommend_command)
 app.command("inspect")(inspect_command)
 app.command()(status)

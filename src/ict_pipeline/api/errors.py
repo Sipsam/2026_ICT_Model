@@ -24,6 +24,7 @@ ERRORS: dict[str, tuple[int, str]] = {
     "prediction_failed": (500, "The selected model could not complete the inspection."),
     "model_unavailable": (503, "The selected model could not be initialized."),
     "storage_unavailable": (503, "The inspection store could not complete the operation."),
+    "history_unavailable": (503, "The configured inspection store does not support history queries."),
     "inference_timeout": (504, "Inspection exceeded its configured processing deadline."),
 }
 

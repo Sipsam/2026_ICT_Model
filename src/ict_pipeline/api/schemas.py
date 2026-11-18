@@ -43,6 +43,14 @@ class StoredInspection(Contract):
     result: InspectionResult
 
 
+def decode_stored_inspection(data: bytes | str) -> StoredInspection:
+    record = StoredInspection.model_validate_json(data)
+    if ("schema_version" not in record.model_fields_set
+            or "schema_version" not in record.result.model_fields_set):
+        raise ValueError("A persisted inspection must declare both schema versions.")
+    return record
+
+
 class ErrorInfo(Contract):
     code: str
     message: str

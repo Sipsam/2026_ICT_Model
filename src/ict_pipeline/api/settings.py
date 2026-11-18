@@ -7,6 +7,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import Field, model_validator
 
+from ..data.preprocessing.common import safe_component
 from ..inspection.contracts import CheckpointKind, Contract, Device, InspectionThresholds, MockScenario
 from ..inspection.service import MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS
 from ..models.contracts import ModelName
@@ -47,6 +48,8 @@ class APISettings(Contract):
     host: str = "127.0.0.1"
     port: int = Field(default=8000, ge=1, le=65535)
     storage_root: Path = Path("outputs/inspection-api")
+    storage_backend: Literal["file", "sqlite"] = "file"
+    database_name: str = "inspections.sqlite3"
     model_root: Path = Path("runs/training")
     models: dict[ModelID, ModelSpec] = Field(default_factory=lambda: {
         "mock-empty": MockModel(mode="mock"),
@@ -70,6 +73,8 @@ class APISettings(Contract):
             raise ValueError("Real models exceed the configured startup capacity.")
         if not self.host or not self.host.isascii() or any(c.isspace() for c in self.host):
             raise ValueError("Supply a valid bind host.")
+        if not safe_component(self.database_name) or not self.database_name.endswith(".sqlite3"):
+            raise ValueError("Supply a local .sqlite3 filename within storage_root.")
         return self
 
 

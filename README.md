@@ -212,6 +212,16 @@ python -m ict_pipeline.api
 
 The server defaults to `http://127.0.0.1:8000` with two explicitly simulated models and requires no detector weights for mock mode. Submit JPEG or PNG images singly or in batches and retrieve stored results by ID. Use the [REST API guide](docs/rest-api.md) for curl and Python examples, OpenAPI, trusted model configuration, and deployment limits.
 
+The API also lists and filters inspection history, exports JSON or CSV, and reports UTC daily counts and defect frequencies. Statistics count real inspections by default. The file repository remains the default. Set `"storage_backend": "sqlite"` in the JSON file selected by `ICT_API_CONFIG` to use indexed SQLite history. The API and CLI share this configuration.
+
+```text
+ict history --mode real list --limit 25
+ict history --mode real export outputs/line-history --format csv
+ict history import-files outputs/legacy-inspections --dry-run
+```
+
+The history commands work without starting inference. See the [inspection database guide](docs/inspection-database.md) for storage setup, migration, backup, restore, and retention.
+
 ## Inspect runs and export local reports
 
 ```text

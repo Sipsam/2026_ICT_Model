@@ -20,14 +20,14 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ..config.settings import Credentials
-from ..data.preprocessing.common import require_separate_output
-from ..data.preprocessing.console import protect_source_data
 from ..evaluation.adapters import PredictorFactory
 from .errors import APIError
-from .repository import FileInspectionRepository, InspectionRepository
+from .repository import InspectionRepository
 from .routes import router
 from .services import InspectionAPI, ModelManager
-from .settings import APISettings, TrustedModel, is_loopback, load_settings
+from .settings import APISettings, is_loopback, load_settings
+from .sqlite_schema import InspectionDatabaseError
+from .storage import open_repository, storage_root
 
 logger = logging.getLogger(__name__)
 
@@ -121,16 +121,14 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
-            root = settings.storage_root.resolve()
-            credentials.protect_path(str(root), "inspection storage")
-            protect_source_data(root, Path.cwd())
-            if any(isinstance(spec, TrustedModel) for spec in settings.models.values()):
-                require_separate_output(settings.model_root.resolve(), root)
+            root = storage_root(settings, credentials)
             root.mkdir(mode=0o700, parents=True, exist_ok=True)
-            store = repository if repository is not None else FileInspectionRepository(
-                root, retention_seconds=settings.retention_seconds,
+            store = repository if repository is not None else await run_in_threadpool(
+                open_repository, settings, credentials,
             )
             temporary = TemporaryDirectory(dir=root, prefix=".work-")
+        except InspectionDatabaseError as exc:
+            raise RuntimeError(f"Cannot initialize inspection storage. {exc}") from None
         except Exception:
             raise RuntimeError("Cannot initialize inspection storage. Check the configured roots and permissions.") from None
         with temporary as directory:

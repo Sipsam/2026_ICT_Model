@@ -1,8 +1,9 @@
+import csv
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from threading import Event
 from time import monotonic, sleep
@@ -25,6 +26,7 @@ from ict_pipeline.api.app import create_app
 from ict_pipeline.api.repository import FileInspectionRepository
 from ict_pipeline.api.schemas import StoredInspection
 from ict_pipeline.api.settings import APISettings, MockModel, TrustedModel
+from ict_pipeline.api.sqlite_repository import SQLiteInspectionRepository
 from ict_pipeline.inspection.service import MockPredictor
 from ict_pipeline.models.contracts import ModelName
 from ict_pipeline.models.dataset import Sample
@@ -32,6 +34,7 @@ from ict_pipeline.evaluation.contracts import Prediction
 from ict_pipeline.pipeline.store import fingerprint_path
 
 from test_inspection import AdapterFixture, make_run
+from test_inspection_database import connect, inspection
 
 SINGLE = "/v1/inspections"
 BATCH = f"{SINGLE}/batch"
@@ -73,6 +76,70 @@ def assert_error(response: Response, status: int, code: str) -> None:
     assert body["request_id"] == response.headers["X-Request-ID"]
     assert body["error"]["code"] == code and body["error"]["message"]
     assert response.headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.parametrize("backend", ["file", "sqlite"])
+def test_history_statistics_and_exports(settings: APISettings, backend: str) -> None:
+    settings = settings.model_copy(update={"storage_backend": backend})
+    with client_for(create_app(settings)) as client:
+        assert client.get(SINGLE).json() == {"schema_version": 1, "total": 0, "limit": 100, "offset": 0, "items": []}
+        mock = single(client, request_id="=request")
+        assert mock.status_code == 201
+        assert single(client, model_id="mock-empty").status_code == 201
+        page_response = client.get(SINGLE, params={"mode": "mock", "limit": 1, "order": "oldest"})
+        assert page_response.status_code == 200, page_response.text
+        page = page_response.json()
+        assert (page["total"], page["limit"], page["offset"], page["items"]) == (2, 1, 0, [mock.json()])
+        assert client.get(SINGLE, params={"defect_class": "cold_solder"}).json()["items"] == [mock.json()]
+        assert client.get(SINGLE, params={"mode": "real"}).json()["items"] == []
+        summary = client.get("/v1/statistics/summary").json()
+        assert summary == {"schema_version": 1, "mode": "real", "total_inspections": 0,
+                           "total_detections": 0, "by_status": {}, "by_model": {}}
+        assert client.get("/v1/statistics/summary", params={"mode": "mock"}).json()["total_inspections"] == 2
+        assert client.get("/v1/statistics/defects").json()["items"] == []
+        assert client.get("/v1/statistics/defects", params={"mode": "mock"}).json()["items"] == [
+            {"class_name": "cold_solder", "inspection_count": 1, "detection_count": 1},
+        ]
+        assert sum(item["inspection_count"] for item in (
+            client.get("/v1/statistics/trends", params={"mode": "all"}).json()["items"]
+        )) == 2
+        for params in ({"limit": 501}, {"offset": -1}, {"defect_class": "invalid"}, {"unknown": "ignored?"},
+                       {"created_from": "2026-01-01"}, {"created_from": "0"}, {"mode": "invalid"},
+                       {"created_from": "2026-02-01T00:00:00Z", "created_before": "2026-01-01T00:00:00Z"}):
+            assert_error(client.get(SINGLE, params=params), 422, "invalid_request")
+        json_export = client.get(f"{SINGLE}/export", params={"format": "json", "limit": 1, "order": "oldest"})
+        assert json_export.json() == page
+        assert json_export.headers["content-disposition"] == 'attachment; filename="history.json"'
+        csv_export = client.get(f"{SINGLE}/export", params={"format": "csv", "limit": 1, "order": "oldest"})
+        assert csv_export.status_code == 200
+        assert csv_export.headers["content-type"].startswith("text/csv")
+        assert csv_export.headers["x-total-count"] == "2"
+        (row,) = list(csv.DictReader(StringIO(csv_export.text)))
+        assert row["request_id"] == "'=request"
+        assert json.loads(row["record_json"]) == mock.json()
+        spec = client.get("/openapi.json").json()
+        assert "limit" in {p["name"] for p in spec["paths"][SINGLE]["get"]["parameters"]}
+        assert "text/csv" in spec["paths"][f"{SINGLE}/export"]["get"]["responses"]["200"]["content"]
+
+    with client_for(create_app(settings)) as restarted:
+        assert restarted.get(mock.headers["Location"]).json() == mock.json()
+
+
+def test_sqlite_history_filters_real_records_and_hides_corruption(settings: APISettings) -> None:
+    settings = settings.model_copy(update={"storage_backend": "sqlite"})
+    path = settings.storage_root / settings.database_name
+    record = inspection()
+    SQLiteInspectionRepository(path).add(record)
+    with client_for(create_app(settings)) as client:
+        result = client.get(SINGLE, params={"created_from": "2025-01-01T19:00:00-05:00", "model": "yolo",
+                                           "status": "defect_detected", "model_id": "line-3", "mode": "real"})
+        assert result.status_code == 200
+        assert result.json()["total"] == 1
+        assert client.get("/v1/statistics/summary").json()["total_inspections"] == 1
+        with connect(path) as database:
+            database.execute("UPDATE inspections SET record_json = 'redacted test value'")
+        assert_error(client.get(SINGLE), 503, "storage_unavailable")
+        assert_error(client.get(f"{SINGLE}/{record.inspection_id}"), 503, "storage_unavailable")
 
 
 def test_mock_result_persists_and_openapi_uses_shared_schema(settings: APISettings) -> None:
