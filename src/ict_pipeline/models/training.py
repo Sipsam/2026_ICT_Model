@@ -1,9 +1,11 @@
 """Plan and execute new per-model runs with reproducible metadata."""
 
 import json
+import math
 import os
 import platform
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass
 from importlib import import_module
 from importlib.metadata import version
@@ -16,12 +18,14 @@ from uuid import uuid4
 import yaml
 from pydantic import ValidationError
 
-from ..config.settings import Credentials, is_filesystem_path
+from ..config.settings import Credentials, SetupError, is_filesystem_path
 from ..config.storage import SetupFiles
 from ..data.preprocessing.common import require_separate_output
 from ..data.preprocessing.console import protect_source_data
 from ..data.preprocessing.policy import label_policy
+from ..pipeline.model import PipelineError
 from ..pipeline.store import RunStore, digest_json, fingerprint_path, timestamp
+from ..reporting.attempt import track_attempt
 from .contracts import Checkpoints, ModelAdapter, ModelName, Progress, TrainConfig, TrainingError, TrainingRequest
 from .dataset import DetectionData, inspect_data
 from .registry import REGISTRY, failure_message, resolve_device
@@ -34,6 +38,7 @@ class TrainingPlan:
     destination: Path
     resume_from: Path | None
     credentials: Credentials
+    workspace: Path
 
 
 def _config(name: ModelName, directory: Path | None) -> TrainConfig:
@@ -83,7 +88,7 @@ def plan_training(
         source = dataset / REGISTRY[name].data_format
         if not source.is_dir() or not source.resolve().is_relative_to(dataset):
             raise TrainingError("Generated detection data is missing. Pass --dataset with the detection conversion directory.")
-    return TrainingPlan(models, dataset, destination, resume_from, credentials)
+    return TrainingPlan(models, dataset, destination, resume_from, credentials, workspace)
 
 
 def checkpoint_paths(name: ModelName, output: Path) -> Checkpoints:
@@ -97,16 +102,6 @@ def _records(output: Path, checkpoints: Checkpoints) -> dict[str, dict[str, str]
         if path.is_file():
             records[key] = {"path": path.relative_to(output).as_posix(), "fingerprint": fingerprint_path(path)}
     return records
-
-
-def _write_metadata(output: Path, metadata: dict[str, object]) -> None:
-    temporary = output / "run.json.tmp"
-    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
-        json.dump(metadata, stream, indent=2, ensure_ascii=True)
-        stream.write("\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    temporary.replace(output / "run.json")
 
 
 def _resume_checkpoint(
@@ -140,6 +135,25 @@ def _resume_checkpoint(
 
 
 def execute_training(plan: TrainingPlan, progress: Progress) -> Iterator[tuple[ModelName, Checkpoints]]:
+    plan.destination.mkdir(parents=True, exist_ok=False)
+    store = RunStore(plan.destination.parent, plan.destination.name, plan.credentials)
+    configuration = {
+        "models": {name.value: config.model_dump(mode="json") for name, config in plan.models.items()},
+        "dataset": str(plan.dataset), "resume_from": str(plan.resume_from) if plan.resume_from else None,
+    }
+    packages = tuple(package for name in plan.models for package in REGISTRY[name].libraries)
+    with store.lock(), ExitStack() as attempt:
+        attempt.enter_context(track_attempt(
+            store, plan.workspace, "training", configuration, packages, (TrainingError, SetupError, PipelineError),
+        ))
+        store.log({"time": timestamp(), "stage": "training preflight"})
+        for index, result in enumerate(_execute_training(plan, progress), 1):
+            if index == len(plan.models):
+                attempt.close()
+            yield result
+
+
+def _execute_training(plan: TrainingPlan, progress: Progress) -> Iterator[tuple[ModelName, Checkpoints]]:
     datasets: dict[str, DetectionData] = {}
     runtimes = {}
     for name, config in plan.models.items():
@@ -197,7 +211,7 @@ def _train_model(
     output.mkdir(parents=True, exist_ok=False)
     started = monotonic()
     checkpoints = checkpoint_paths(name, output)
-    store = RunStore(output.parent, name)
+    store = RunStore(output.parent, name, plan.credentials)
     with store.lock():
         last_logged = 0.0
 
@@ -210,15 +224,20 @@ def _train_model(
                     "elapsed_seconds": round(now - started, 3),
                 })
                 last_logged = now
-            progress(f"{name} {stage}", done, total)
+            progress(f"{name} {plan.credentials.redact_text(stage)}", done, total)
 
-        _write_metadata(output, metadata)
+        def record_metrics(values: Mapping[str, float]) -> None:
+            metrics = {key: value for key, value in values.items() if math.isfinite(value)}
+            metadata["metrics"] = plan.credentials.redact(metrics)
+            store.write_json("run.json", metadata)
+
+        store.write_json("run.json", metadata)
         try:
             resume = None
             if plan.resume_from:
                 resume = _resume_checkpoint(name, plan.resume_from, output, str(metadata["run_fingerprint"]))
             report(f"starting on {device}", 0, config.epochs)
-            result = adapter.train(TrainingRequest(config, data, output, device, report, resume))
+            result = adapter.train(TrainingRequest(config, data, output, device, report, resume, record_metrics))
             if result != checkpoints or len(_records(output, result)) != 2:
                 raise TrainingError("Training did not produce both best and last checkpoints.")
             metadata["status"] = "completed"
@@ -228,11 +247,12 @@ def _train_model(
         except Exception as exc:
             metadata["status"] = "failed"
             message = str(exc) if isinstance(exc, TrainingError) else failure_message(exc, backend)
+            message = plan.credentials.redact_text(message)
             metadata["error"] = message
             raise TrainingError(f"{name}. {message}") from None
         finally:
             metadata["finished_at"] = timestamp()
             metadata["elapsed_seconds"] = round(monotonic() - started, 3)
             metadata["checkpoints"] = _records(output, checkpoints)
-            _write_metadata(output, metadata)
+            store.write_json("run.json", metadata)
     return result

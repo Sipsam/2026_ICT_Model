@@ -1,5 +1,6 @@
 """Resolve and validate setup settings without importing runtime backends."""
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from importlib.resources import files
@@ -67,6 +68,16 @@ CREDENTIAL_LABELS = {
     "REMOTE_SSH_KEY_PATH": "Remote SSH key path",
 }
 
+_SECRET_NAMES = (
+    r"api[_-]?key|access[_-]?key|password|passwd|token|secret|authorization|credentials?"
+    r"|private[_-]?key|ssh[_-]?key|tracking[_-]?uri|remote[_-]?(?:host|user)|signature"
+)
+_SECRET_FIELD = re.compile(rf"(?:^|[_-])(?:{_SECRET_NAMES})(?:$|[_-])", re.I)
+_SECRET_ASSIGNMENT = re.compile(
+    rf"""(?i)([\w-]*(?:{_SECRET_NAMES})[\w-]*["']?\s*(?:=|:)\s*)"""
+    r"""(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s&,;]+)"""
+)
+
 
 def required_credentials(settings: Settings) -> list[str]:
     required: list[str] = []
@@ -90,7 +101,8 @@ class Credentials:
     def load(cls, dotenv: Mapping[str, str], environ: Mapping[str, str]) -> "Credentials":
         credentials = cls()
         for source in (dotenv, environ):
-            for name in CREDENTIAL_LABELS:
+            for name in (*CREDENTIAL_LABELS, "MLFLOW_TRACKING_TOKEN", "MLFLOW_TRACKING_USERNAME",
+                         "MLFLOW_TRACKING_PASSWORD"):
                 if name in source and source[name].strip():
                     credentials.add(name, source[name])
         return credentials
@@ -105,6 +117,31 @@ class Credentials:
             for secret in self._known_values
         ):
             raise SetupError(f"{name} contains a credential. Use a filesystem path.")
+
+    def redact_text(self, value: str) -> str:
+        for secret in sorted(self._known_values, key=len, reverse=True):
+            if len(secret) >= 4:
+                value = value.replace(secret, "[REDACTED]")
+            elif secret == value:
+                return "[REDACTED]"
+        value = re.sub(r"(?i)([a-z][a-z0-9+.-]*://)[^/\s@]+@", r"\1[REDACTED]@", value)
+        value = re.sub(r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+                       "[REDACTED]", value)
+        value = re.sub(r"(?i)\b(Bearer|Basic)\s+[\w./+=~-]+", r"\1 [REDACTED]", value)
+        return _SECRET_ASSIGNMENT.sub(r"\1[REDACTED]", value)
+
+    def redact(self, value: object) -> object:
+        if isinstance(value, Mapping):
+            return {
+                self.redact_text(str(key)): "[REDACTED]"
+                if _SECRET_FIELD.search(re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(key))) else self.redact(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [self.redact(item) for item in value]
+        if isinstance(value, (str, SecretStr)):
+            return self.redact_text(str(value))
+        return value
 
     def require(self, settings: Settings) -> None:
         missing = [name for name in required_credentials(settings) if name not in self.values]

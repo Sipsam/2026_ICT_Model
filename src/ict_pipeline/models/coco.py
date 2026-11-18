@@ -146,6 +146,7 @@ class CocoAdapter:
                 _atomic_copy(checkpoints.last, checkpoints.best)
             if cfg.save_period and epoch % cfg.save_period == 0:
                 _atomic_copy(checkpoints.last, request.output / f"epoch-{epoch}.pt")
+            request.record_metrics({"epoch": epoch, "val_loss": val_loss, "best_val_loss": best_loss})
             request.progress("epoch checkpoint", epoch, cfg.epochs)
         return checkpoints
 

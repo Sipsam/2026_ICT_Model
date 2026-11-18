@@ -5,6 +5,7 @@ import json
 import os
 import platform
 from collections.abc import Iterator
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean, median
@@ -13,16 +14,18 @@ from time import monotonic, perf_counter
 from typing import Any, Literal
 from uuid import uuid4
 
-from ..config.settings import Credentials, is_filesystem_path
+from ..config.settings import Credentials, SetupError, is_filesystem_path
 from ..config.storage import SetupFiles
 from ..data.preprocessing.common import require_separate_output
 from ..data.preprocessing.console import protect_source_data
 from ..data.preprocessing.policy import label_policy
-from ..models.contracts import ModelName, Progress, TrainConfig
+from ..models.contracts import ModelName, Progress, TrainConfig, TrainingError
 from ..models.dataset import Split, read_coco_split
 from ..models.registry import REGISTRY
 from ..models.training import checkpoint_paths
+from ..pipeline.model import PipelineError
 from ..pipeline.store import RunStore, digest_json, fingerprint_path, timestamp
+from ..reporting.attempt import track_attempt
 from .adapters import PredictorFactory, load_predictor
 from .contracts import MAX_DETECTIONS, EvaluationConfig, EvaluationError, EvaluationSplit, Prediction, Predictor
 from .metrics import IOU_THRESHOLDS, detection_metrics
@@ -215,51 +218,62 @@ def evaluate_runs(
     protect_source_data(output, workspace)
     for source in (dataset, reference, *sources):
         require_separate_output(source, output)
-    checkpoints = [_checkpoint(source, kind, credentials) for source in sources]
-
-    try:
-        labels, hashes, annotation_hash, snapshots = _split(dataset, split, credentials, progress, labels_required=True)
-        reference_hashes = {}
-        if split == EvaluationSplit.TEST:
-            for name in ("train", "val"):
-                _, other, _, reference_snapshots = _split(reference, name, credentials, progress, labels_required=False)
-                reference_hashes[name] = digest_json(other)
-                if hashes.keys() & other.keys() or set(hashes.values()) & set(other.values()):
-                    raise EvaluationError("Test shares image filenames or bytes with Train or Validation.")
-                snapshots.update(reference_snapshots)
-            if any(reference_hashes != checkpoint.split_fingerprints for checkpoint in checkpoints):
-                raise EvaluationError("Reference splits must match the recorded Train and Validation of every model.")
-    except (OSError, ValueError, TypeError, KeyError):
-        raise EvaluationError("Cannot read or validate the labeled COCO split. Check annotations and image paths.") from None
-
-    dataset_record = {
-        "split": split.value, "role": "held_out_test" if held_out else "validation_for_tuning",
-        "held_out_attested": held_out, "image_count": len(labels.images), "image_fingerprint": digest_json(hashes),
-        "annotation_fingerprint": annotation_hash, "reference_split_fingerprints": reference_hashes,
+    store = RunStore(output.parent, output.name, credentials)
+    configuration = {
+        **config.model_dump(mode="json"), "split": split.value, "dataset": str(dataset),
+        "checkpoint": kind, "training_runs": [str(source) for source in sources],
+        "held_out": held_out, "reference_dataset": str(reference) if reference_dataset is not None else None,
     }
-    package = Path(__file__).parents[1]
-    code = {path.relative_to(package).as_posix(): fingerprint_path(path)
-            for part in ("evaluation", "models") for path in sorted((package / part).glob("*.py"))}
-    protocol = {
-        "ap": "COCO bbox all-area (non-crowd)", "ap_iou_thresholds": IOU_THRESHOLDS,
-        "recall_points": 101, "max_detections_per_image_per_class": MAX_DETECTIONS,
-        "configuration": config.model_dump(mode="json"), "label_policy": label_policy(),
-    }
-    records = [
-        {"model": checkpoint.name.value, "checkpoint": {
-            "path": str(checkpoint.path), "kind": kind, "fingerprint": checkpoint.fingerprint,
-            "size_bytes": checkpoint.bytes,
-        }, "training_configuration": checkpoint.config.model_dump(mode="json"),
-         "training_split_fingerprints": checkpoint.split_fingerprints}
-        for checkpoint in checkpoints
-    ]
-    request = {"dataset": dataset_record, "protocol": protocol, "code": code, "models": records}
-    identity = digest_json(request)
-    marker = output / "evaluation.json"
-    if resume_from is not None and not marker.is_file():
+    packages = ("torch", "torchvision", "ultralytics", "transformers", "numpy", "scipy")
+    safe_errors = (EvaluationError, TrainingError, PipelineError, SetupError)
+    if resume_from is not None and not (output / "evaluation.json").is_file():
         raise EvaluationError("Select a previous evaluation directory for --resume-from.")
-    store = RunStore(output.parent, output.name)
-    with store.lock():
+    with store.lock(), ExitStack() as attempt:
+        if resume_from is None:
+            attempt.enter_context(track_attempt(store, workspace, "evaluation", configuration, packages, safe_errors))
+            store.log({"time": timestamp(), "stage": "evaluation preflight"})
+
+        checkpoints = [_checkpoint(source, kind, credentials) for source in sources]
+
+        try:
+            labels, hashes, annotation_hash, snapshots = _split(dataset, split, credentials, progress, labels_required=True)
+            reference_hashes = {}
+            if split == EvaluationSplit.TEST:
+                for name in ("train", "val"):
+                    _, other, _, reference_snapshots = _split(reference, name, credentials, progress, labels_required=False)
+                    reference_hashes[name] = digest_json(other)
+                    if hashes.keys() & other.keys() or set(hashes.values()) & set(other.values()):
+                        raise EvaluationError("Test shares image filenames or bytes with Train or Validation.")
+                    snapshots.update(reference_snapshots)
+                if any(reference_hashes != checkpoint.split_fingerprints for checkpoint in checkpoints):
+                    raise EvaluationError("Reference splits must match the recorded Train and Validation of every model.")
+        except (OSError, ValueError, TypeError, KeyError):
+            raise EvaluationError("Cannot read or validate the labeled COCO split. Check annotations and image paths.") from None
+
+        dataset_record = {
+            "split": split.value, "role": "held_out_test" if held_out else "validation_for_tuning",
+            "held_out_attested": held_out, "image_count": len(labels.images), "image_fingerprint": digest_json(hashes),
+            "annotation_fingerprint": annotation_hash, "reference_split_fingerprints": reference_hashes,
+        }
+        package = Path(__file__).parents[1]
+        code = {path.relative_to(package).as_posix(): fingerprint_path(path)
+                for part in ("evaluation", "models") for path in sorted((package / part).glob("*.py"))}
+        protocol = {
+            "ap": "COCO bbox all-area (non-crowd)", "ap_iou_thresholds": IOU_THRESHOLDS,
+            "recall_points": 101, "max_detections_per_image_per_class": MAX_DETECTIONS,
+            "configuration": config.model_dump(mode="json"), "label_policy": label_policy(),
+        }
+        records = [
+            {"model": checkpoint.name.value, "checkpoint": {
+                "path": str(checkpoint.path), "kind": kind, "fingerprint": checkpoint.fingerprint,
+                "size_bytes": checkpoint.bytes,
+            }, "training_configuration": checkpoint.config.model_dump(mode="json"),
+             "training_split_fingerprints": checkpoint.split_fingerprints}
+            for checkpoint in checkpoints
+        ]
+        request = {"dataset": dataset_record, "protocol": protocol, "code": code, "models": records}
+        identity = digest_json(request)
+        marker = output / "evaluation.json"
         if resume_from is None:
             _publish(marker, {"request_fingerprint": identity, **request})
         else:
@@ -267,6 +281,7 @@ def evaluate_runs(
             if (not isinstance(original, dict) or original.pop("request_fingerprint", None) != identity
                     or digest_json(original) != identity):
                 raise EvaluationError("Resume requires the same checkpoints, split, configuration, and code.")
+            attempt.enter_context(track_attempt(store, workspace, "evaluation", configuration, packages, safe_errors))
         progress(f"evaluation directory {output}", 0, 0)
 
         for index, (checkpoint, record) in enumerate(zip(checkpoints, records, strict=True), 1):
@@ -275,6 +290,8 @@ def evaluate_runs(
                 saved = read_report(target)
                 if saved.get("request_fingerprint") != identity or saved.get("model_index") != index:
                     raise EvaluationError("A completed report does not match this evaluation request.")
+                if index == len(checkpoints):
+                    attempt.close()
                 yield target
                 continue
 
@@ -310,7 +327,7 @@ def evaluate_runs(
                 raise
             except EvaluationError as exc:
                 store.log({"time": timestamp(), "stage": active_stage, "model_index": index, "status": "failed"})
-                raise EvaluationError(f"{checkpoint.name} {active_stage}. {exc}") from None
+                raise EvaluationError(credentials.redact_text(f"{checkpoint.name} {active_stage}. {exc}")) from None
             except Exception:
                 store.log({"time": timestamp(), "stage": active_stage, "model_index": index, "status": "failed"})
                 raise EvaluationError(
@@ -319,14 +336,16 @@ def evaluate_runs(
             result = {
                 **record, "schema_version": 1, "status": "completed", "finished_at": timestamp(),
                 "model_index": index, "request_fingerprint": identity, "dataset": dataset_record,
-                "protocol": protocol, "metrics": metrics, "speed": speed,
-                "postprocessing": predictor.postprocessing, "libraries": predictor.libraries,
+                "protocol": protocol, "metrics": credentials.redact(metrics), "speed": credentials.redact(speed),
+                "postprocessing": credentials.redact(predictor.postprocessing), "libraries": credentials.redact(predictor.libraries),
                 "python": platform.python_version(), "code_fingerprints": code,
             }
             del predictor, predictions
             credentials.protect_path(json.dumps(result, ensure_ascii=False), "evaluation report")
             _publish(target, {"fingerprint": digest_json(result), "result": result})
             store.log({"time": timestamp(), "stage": "publish report", "model_index": index, "status": "completed"})
+            if index == len(checkpoints):
+                attempt.close()
             yield target
 
 
@@ -335,6 +354,12 @@ def compare_reports(workspace: Path, paths: tuple[Path, ...]) -> dict[str, objec
         raise EvaluationError("Supply at least two completed evaluation reports.")
     credentials = SetupFiles.read(workspace, None).credentials(os.environ)
     reports = [read_report(_local(path, workspace, credentials)) for path in paths]
+    comparison = compare_results(reports)
+    credentials.protect_path(json.dumps(comparison, ensure_ascii=False), "comparison report")
+    return comparison
+
+
+def compare_results(reports: list[dict[str, Any]]) -> dict[str, object]:
     anchor = reports[0]
     try:
         if any(
@@ -352,8 +377,6 @@ def compare_reports(workspace: Path, paths: tuple[Path, ...]) -> dict[str, objec
             and entry["libraries"].get("torchvision") == anchor["libraries"].get("torchvision")
             for entry in reports[1:]
         )
-        comparison = {"dataset": anchor["dataset"], "matching_speed_environment": speed_comparable, "models": reports}
-        credentials.protect_path(json.dumps(comparison, ensure_ascii=False), "comparison report")
-        return comparison
+        return {"dataset": anchor["dataset"], "matching_speed_environment": speed_comparable, "models": reports}
     except (KeyError, AttributeError, TypeError):
         raise EvaluationError("An evaluation report is missing comparison fields.") from None

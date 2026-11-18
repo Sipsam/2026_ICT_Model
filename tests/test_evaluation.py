@@ -138,7 +138,10 @@ def test_cli_refuses_missing_checkpoint_and_ground_truth(tmp_path: Path, monkeyp
     result = CliRunner().invoke(app, ["evaluate", "--run", str(run), "--dataset", str(data)])
     assert result.exit_code == 1
     assert "ground-truth" in result.stderr
-    assert not (tmp_path / "outputs").exists()
+    attempts = sorted((tmp_path / "outputs/evaluation").glob("*/attempt.json"))
+    assert len(attempts) == 2
+    assert all(json.loads(path.read_text())["status"] == "failed" for path in attempts)
+    assert all(not (path.parent / "evaluation.json").exists() for path in attempts)
 
     checkpoint_paths(ModelName.YOLO, run).best.write_bytes(b"changed")
     result = CliRunner().invoke(app, ["evaluate", "--run", str(run), "--dataset", str(data)])
@@ -177,6 +180,12 @@ def test_cross_adapter_evaluation_and_resume(tmp_path: Path, monkeypatch: pytest
     directory, = (tmp_path / "results").iterdir()
     events = [json.loads(row) for row in (directory / "events.jsonl").read_text().splitlines()]
     assert {"model_index": 2, "stage": "load checkpoint", "status": "interrupted"}.items() <= events[-1].items()
+    catalog = CliRunner().invoke(app, ["compare", "--evaluation-root", "results"])
+    assert catalog.exit_code == 0, catalog.output
+    tracked = json.loads(catalog.stdout)
+    assert tracked["runs"][0]["status"] == "interrupted"
+    assert tracked["runs"][0]["models"][0]["status"] == "completed"
+    assert not tracked["comparison_groups"]
     first = loaded[models[0]]
     paths = run(directory)
     assert loaded[models[0]] is first

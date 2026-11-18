@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -57,6 +57,7 @@ class TrainingRequest:
     device: str
     progress: Progress
     resume: Checkpoints | None = None
+    record_metrics: Callable[[Mapping[str, float]], None] = lambda _: None
 
 
 class ModelAdapter(Protocol):

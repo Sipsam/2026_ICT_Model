@@ -26,6 +26,7 @@ from .pipeline import PipelineError, StageRunner
 from .pipeline.model import valid_id
 from .pipeline.runner import StageEvent
 from .pipeline.stages import pipeline_stages
+from .reporting.commands import compare, report, runs_app, status
 
 app = typer.Typer(
     name="ict",
@@ -37,6 +38,10 @@ app = typer.Typer(
 
 
 app.add_typer(data_app, name="data")
+app.add_typer(runs_app, name="runs")
+app.command()(status)
+app.command()(compare)
+app.command()(report)
 
 
 def _show_version(value: bool) -> None:
@@ -204,6 +209,7 @@ def _pipeline(config: Path | None, run_id: str | None, approve_download: bool = 
         if key in settings:
             try:
                 settings[key] = (root / settings[key]).resolve().as_posix()
+                credentials.protect_path(settings[key], f"resolved {key}")
             except (OSError, RuntimeError, ValueError):
                 raise SetupError(f"Cannot resolve {key}. Check the path and permissions.") from None
     data = None
@@ -223,7 +229,7 @@ def _pipeline(config: Path | None, run_id: str | None, approve_download: bool = 
         stages = pipeline_stages(dataset_root=Path(settings["data_path"]))
     else:
         stages = pipeline_stages()
-    return StageRunner(stages, root, settings, on_event=_pipeline_progress)
+    return StageRunner(stages, root, settings, on_event=_pipeline_progress, credentials=credentials)
 
 
 def _pipeline_failure(exc: Exception) -> NoReturn:
@@ -267,26 +273,6 @@ def run(
     except KeyboardInterrupt:
         typer.echo("Run cancelled. Use ict status and ict resume to continue.", err=True)
         raise typer.Exit(code=130) from None
-
-
-@app.command(help="Show the last recorded attempt for each stage in a run.")
-def status(run_id: RunIdOption = None) -> None:
-    try:
-        state = StageRunner(pipeline_stages(), Path.cwd(), {}).status(run_id)
-    except (PipelineError, OSError, ValueError) as exc:
-        _pipeline_failure(exc)
-    typer.echo(f"Run {state.run_id}   {state.status}   updated {state.updated_at}")
-    typer.echo("Selection   " + ", ".join(state.selection))
-    if state.pending_force:
-        typer.echo("Pending forced stages   " + ", ".join(state.pending_force))
-    for name in dict.fromkeys((*state.selection, *state.stages)):
-        record = state.stages.get(name)
-        if record is None:
-            typer.echo(f"{name}   pending")
-            continue
-        elapsed = f"   {record.elapsed_seconds:.1f}s" if record.elapsed_seconds is not None else ""
-        detail = f"   {record.error}" if record.error else ""
-        typer.echo(f"{name}   {record.status}{elapsed}{detail}")
 
 
 @app.command(help="Resume the last selection for a saved run and verify its cached results.")
@@ -418,28 +404,6 @@ def evaluate(
     except KeyboardInterrupt:
         typer.echo("Evaluation interrupted. Resume with the evaluation directory and original arguments.", err=True)
         raise typer.Exit(code=130) from None
-
-
-@app.command(help="Compare completed reports from the same labeled split and protocol.")
-def compare(
-    reports: Annotated[list[Path], typer.Argument(help="Two or more model evaluation JSON reports.")],
-) -> None:
-    from .evaluation.runner import compare_reports
-
-    try:
-        comparison = compare_reports(Path.cwd(), tuple(reports))
-        typer.echo(json.dumps(comparison, indent=2, allow_nan=False))
-    except (EvaluationError, SetupError) as exc:
-        typer.echo(f"Comparison failed. {exc}", err=True)
-        raise typer.Exit(code=1) from None
-    except (OSError, ValueError, RuntimeError):
-        typer.echo("Comparison failed. Check report contents and file permissions.", err=True)
-        raise typer.Exit(code=1) from None
-
-
-@app.command(help="Generate pipeline reports (planned).")
-def report() -> None:
-    _not_implemented("report")
 
 
 @app.command(help="Clean generated artifacts (planned).")

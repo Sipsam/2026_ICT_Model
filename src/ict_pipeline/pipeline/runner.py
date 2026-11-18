@@ -7,6 +7,8 @@ from time import monotonic
 from types import MappingProxyType
 from uuid import uuid4
 
+from ..config.settings import Credentials, Settings
+from ..reporting.metadata import runtime_snapshot
 from .model import PipelineError, Stage, StageContext, StageFailure, StageGraph, StageResult, valid_id
 from .store import (
     FingerprintError, RunState, RunStore, StageRecord, digest_json, fingerprint_path,
@@ -48,12 +50,14 @@ class StageRunner:
         settings: Mapping[str, str],
         *,
         on_event: Callable[[StageEvent], None] | None = None,
+        credentials: Credentials | None = None,
     ) -> None:
         self.graph = StageGraph(stages)
         self.workspace = workspace.resolve()
         self.runs_dir = self.workspace / "runs"
         self.settings = dict(settings)
         self.on_event = on_event
+        self.credentials = credentials or Credentials()
 
     def plan(
         self, selection: tuple[str, ...], *, run_id: str | None = None, force: bool = False
@@ -68,7 +72,7 @@ class StageRunner:
         self, run_id: str, selection: tuple[str, ...], *, force: bool = False
     ) -> RunState:
         selection = self._ordered_selection(selection)
-        store = RunStore(self.runs_dir, run_id)
+        store = RunStore(self.runs_dir, run_id, self.credentials)
         with store.lock():
             now = timestamp()
             state = store.read() or RunState(
@@ -110,7 +114,7 @@ class StageRunner:
             if latest is None:
                 raise PipelineError("No saved run found. Start one with ict run.")
             run_id = latest[1]
-        store = RunStore(self.runs_dir, run_id)
+        store = RunStore(self.runs_dir, run_id, self.credentials)
         if not store.state_path.is_file():
             raise PipelineError("Run state is missing. Check --run-id or start a run with ict run.")
         return store
@@ -232,12 +236,20 @@ class StageRunner:
         abandoned = [(name, record) for name, record in state.stages.items() if record.status == "running"]
         mark_interrupted(state)
         state.status = "running"
+        state.started_at = timestamp()
+        state.finished_at = None
+        state.failure_reason = None
+        config_keys = set(Settings.model_fields).union(*(stage.config_keys for stage in self.graph.stages.values()))
+        state.configuration = {key: value for key, value in self.settings.items() if key in config_keys}
+        state.runtime = {}
         state.selection = list(selection)
         state.pending_force = [name for name in selection if name in forced]
         store.save(state)
         available: dict[str, StageRecord] = {}
         completed = 0
         try:
+            state.runtime = runtime_snapshot(self.workspace)
+            store.save(state)
             for name, record in abandoned:
                 self._emit(store, StageEvent(name, record.attempt, "interrupted", 0, len(selection), 0,
                                              detail=record.error))
@@ -260,16 +272,24 @@ class StageRunner:
                 else:
                     available[name] = self._run_stage(store, state, stage, completed, len(selection), available)
                     completed += 1
-            state.status = "completed"
-            store.save(state)
         except KeyboardInterrupt:
             mark_interrupted(state)
-            store.save(state)
+            state.failure_reason = "Execution was cancelled. Resume to continue."
             raise
-        except (PipelineError, OSError):
+        except Exception as exc:
             state.status = "failed"
+            state.failure_reason = (
+                self.credentials.redact_text(str(exc)) if isinstance(exc, PipelineError)
+                else "Pipeline execution failed. Check the stage adapter, permissions and storage."
+            )
+            if isinstance(exc, (PipelineError, OSError, ValueError)):
+                raise
+            raise PipelineError(state.failure_reason) from None
+        else:
+            state.status = "completed"
+        finally:
+            state.finished_at = timestamp()
             store.save(state)
-            raise
         return state
 
     def _run_stage(
@@ -308,6 +328,7 @@ class StageRunner:
             if stage.execute is None:
                 raise PipelineError(f"Stage {name} requires an adapter. See the pipeline phases in PLANS.md.")
             inputs, record.fingerprint, input_fingerprints = self._inputs(store, stage, available)
+            record.input_fingerprints = input_fingerprints
             temporary = store.working_dir(name, attempt)
             final = store.artifact_dir(name, attempt)
             temporary.mkdir(parents=True)
@@ -347,7 +368,7 @@ class StageRunner:
             if isinstance(exc, KeyboardInterrupt):
                 record.error = "Stage cancelled. Resume to retry it."
             elif isinstance(exc, PipelineError):
-                record.error = str(exc)
+                record.error = self.credentials.redact_text(str(exc))
             else:
                 record.error = f"Could not write run files for {name}. Check permissions and storage, then resume."
             record.finished_at = timestamp()

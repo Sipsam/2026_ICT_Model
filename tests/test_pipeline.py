@@ -122,6 +122,9 @@ def test_dag_selection_dry_run_and_cache(dag: MockDag) -> None:
     assert all("timestamp" in json.loads(line) for line in events.splitlines())
     assert SECRET not in events
     assert SECRET not in store.state_path.read_text()
+    assert state.configuration == {"model": "A"}
+    assert state.started_at and state.finished_at
+    assert state.runtime["git_commit"] is None
 
 
 @pytest.mark.parametrize(

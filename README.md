@@ -32,7 +32,7 @@ The CLI runs without PyTorch, GPU libraries, or dataset files.
 
 `ict --help` lists the registered commands, and `ict --version` prints the installed package version. Both exit with status `0`.
 
-`report` and `clean` are placeholders and exit with status `1`. The rollout is described in [PLANS.md](PLANS.md).
+`clean` is a placeholder and exits with status `1`. The rollout is described in [PLANS.md](PLANS.md).
 
 ## Acquire and verify dataset 71900
 
@@ -65,7 +65,7 @@ The production DAG declares ten stages from download through report. With `datas
 
 With executable stages registered, `ict run` selects the entire DAG and creates a run ID. Pass `--run-id <id>` to choose a name or reuse that run's cache. `--from` and `--until` select an inclusive range in dependency order. Repeat `--only` to select individual stages. Any omitted prerequisite must have a valid result in the same run. `--force` recomputes the selection in new artifact directories.
 
-`ict status` shows the latest recorded attempt per stage. `ict resume` replays the saved selection and rechecks settings, inputs, stage versions, and artifact bytes before reuse. Both commands default to the run with the most recently updated state file. If you ran with `--config`, pass the same file to `resume` to use that profile again.
+`ict status` shows the latest recorded attempt per stage for a pipeline run. Use `--run-id <id>` to select it when training or evaluation has a newer record. `ict resume` defaults to the latest pipeline run and rechecks settings, inputs, stage versions, and artifact bytes before reuse. If you ran with `--config`, pass the same file to `resume` to use that profile again.
 
 Each run stores an atomic snapshot in `runs/<id>/state.json` and a structured event log in `events.jsonl`. A stage writes to `work/<stage>/<attempt>/`. After output verification, the runner publishes the directory under `artifacts/<stage>/<attempt>/` and commits the successful attempt to state. Failed and abandoned attempts remain available for inspection. Only an attempt recorded as completed and verified against its fingerprints is eligible for cache reuse. A lock allows one writer per run, and the OS releases it when the process exits. Cancellation returns status `130`. Progress includes elapsed time and an ETA when the stage reports measurable work.
 
@@ -118,7 +118,25 @@ The evaluator uses COCO bbox AP across all sizes, with 101 interpolated recall p
 | Synchronization and precision | CPU is synchronous. CUDA/ROCm and MPS synchronize around each timed image. Default is `--device cpu --precision fp32`. CUDA/ROCm FP16 uses half-precision weights and input for YOLO and autocast for the other adapters. The report records TF32 settings for CUDA. |
 | Hardware | The report records the available CPU and accelerator identities, device backend, OS, PyTorch thread count, driver and library versions. Cache state, thermals and host load can affect runtimes. `ict compare` flags whether reported hardware and shared runtime settings match. |
 
-Evaluation writes `outputs/evaluation/<attempt>/evaluation.json`, `events.jsonl`, and an atomic schema-versioned JSON report per completed model. Report paths go to stdout and progress to stderr. Reports include the checkpoint fingerprint and file size in bytes, image and annotation fingerprints, the split role, class mapping, evaluation settings, and code fingerprints. Checkpoint size includes training state if the saved file contains it. Resume with `--resume-from <attempt-dir>` and the original arguments in the same order. Completed reports are verified and reused. An interrupted model starts its inference from the beginning. `ict compare` emits JSON and requires reports from the same labeled split, code and evaluation settings.
+Evaluation writes `outputs/evaluation/<attempt>/evaluation.json`, `events.jsonl`, and an atomic schema-versioned JSON report per completed model. Report paths go to stdout and progress to stderr. Reports include the checkpoint fingerprint and file size in bytes, image and annotation fingerprints, the split role, class mapping, evaluation settings, and code fingerprints. Checkpoint size includes training state if the saved file contains it. Resume with `--resume-from <attempt-dir>` and the original arguments in the same order. Completed reports are verified and reused. An interrupted model starts its inference from the beginning. When given explicit paths, `ict compare` requires reports from the same labeled split, code and evaluation settings.
+
+## Inspect runs and export local reports
+
+```text
+ict runs list
+ict runs show training/<id>
+ict status --run-id evaluation/<id>
+ict compare
+ict report
+ict report --format json
+ict report --format csv
+```
+
+The catalog uses the pipeline ID as saved and prefixes standalone run IDs with `training/` or `evaluation/`. Use `--training-root` or `--evaluation-root` to read custom roots supplied to training or evaluation. New standalone attempts record lifecycle and host metadata in `attempt.json` beside the original model records and logs. Pipeline runs save that metadata in `state.json`. Older records show the metadata available in their saved artifacts. An abandoned run can appear as interrupted with no recorded end time.
+
+`ict compare` prints the same versioned document as the JSON export, with run history and completed evaluations grouped by matching split, data fingerprints, code and protocol. Each group flags whether the reported speed environments match. Failed, interrupted and incomplete runs stay visible in the history with any saved results. Training metrics remain available in the model records. CSV has one row per model or one row for a run without model records. It includes common evaluation metrics and JSON columns for detailed metadata. `ict report` writes HTML by default and prints the saved path. Every export gets a fresh directory under `outputs/reports` or the supplied `--output-dir`.
+
+Local recording and reports work without MLflow. To also publish the JSON snapshot as an artifact, use the optional `ict-pipeline[mlflow]` extra, set `MLFLOW_TRACKING_URI` in the environment or `.env`, and run `ict report --mlflow --experiment-id <id>`. The flag sends the report, including run metadata and artifact paths, to the configured MLflow service. Each export creates a new MLflow run. [MLflow client API](https://mlflow.org/docs/latest/api_reference/python_api/mlflow.client.html)
 
 Python consumers can use `ict_pipeline.evaluation.contracts.Prediction` and `Predictor` for normalized, one-based detections with preprocessing metadata, and `ict_pipeline.evaluation.metrics.detection_metrics` for scoring. The report reader is `ict_pipeline.evaluation.runner.read_report`. The pipeline DAG and standalone `ict report` can consume these artifacts in a later phase.
 

@@ -140,6 +140,7 @@ def test_all_and_oom_are_reported(
             outputs = Checkpoints(root / "best.pt", root / "last.pt")
             for path in (outputs.best, outputs.last):
                 path.write_bytes(b"mock weights")
+            request.record_metrics({"val_loss": 0.125})
             return outputs
 
     monkeypatch.chdir(tmp_path)
@@ -160,6 +161,15 @@ def test_all_and_oom_are_reported(
     }
     assert by_model["yolo"]["split_fingerprints"] == by_model["faster_rcnn"]["split_fingerprints"]
     assert by_model["yolo"]["checkpoints"]["best"]["path"] == "weights/best.pt"
+    assert by_model["yolo"]["metrics"] == {"val_loss": 0.125}
+    attempt, = (tmp_path / "runs/training").glob("*/attempt.json")
+    result = CliRunner().invoke(app, ["runs", "show", f"training/{attempt.parent.name}"])
+    assert result.exit_code == 0, result.output
+    tracked = json.loads(result.stdout)
+    assert tracked["status"] == "failed"
+    assert "Reduce batch_size" in tracked["failure_reason"]
+    assert tracked["runtime"]["python"]["version"]
+    assert tracked["started_at"] and tracked["finished_at"]
 
 
 def optional_runtime(name: ModelName) -> ModuleType:

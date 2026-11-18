@@ -2,6 +2,7 @@
 
 import math
 import os
+from numbers import Real
 from pathlib import Path
 from shutil import copyfile
 from types import SimpleNamespace
@@ -102,6 +103,10 @@ class YoloAdapter:
                     temporary = self.wdir / "periodic.tmp"
                     copyfile(last, temporary)
                     temporary.replace(self.wdir / f"epoch-{epoch}.pt")
+                request.record_metrics({
+                    **{key: float(value) for key, value in self.metrics.items() if isinstance(value, Real)},
+                    "epoch": epoch, "fitness": float(self.fitness),
+                })
                 request.progress("epoch checkpoint", epoch, cfg.epochs)
 
             def final_eval(self) -> None:

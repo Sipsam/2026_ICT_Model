@@ -15,6 +15,7 @@ from typing import Annotated, BinaryIO, Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
+from ..config.settings import Credentials
 from .model import PipelineError, valid_id
 
 if os.name == "nt":
@@ -42,6 +43,7 @@ class StageRecord(BaseModel):
     config_fingerprint: Fingerprint | None = None
     output_fingerprint: Fingerprint | None = None
     error: str | None = None
+    input_fingerprints: dict[str, Fingerprint] = Field(default_factory=dict)
 
 
 class RunState(BaseModel):
@@ -53,6 +55,11 @@ class RunState(BaseModel):
     selection: list[str]
     pending_force: list[str]
     stages: dict[str, StageRecord] = Field(default_factory=dict)
+    started_at: str | None = None
+    finished_at: str | None = None
+    configuration: dict[str, object] = Field(default_factory=dict)
+    runtime: dict[str, object] = Field(default_factory=dict)
+    failure_reason: str | None = None
 
 
 def _try_lock(stream: BinaryIO) -> bool:
@@ -85,13 +92,14 @@ def _reject_link(path: Path) -> None:
 
 
 class RunStore:
-    def __init__(self, runs_dir: Path, run_id: str) -> None:
+    def __init__(self, runs_dir: Path, run_id: str, credentials: Credentials | None = None) -> None:
         if not valid_id(run_id):
             raise PipelineError("Run IDs use up to 64 lowercase letters, digits, underscores, or hyphens.")
         self.run_id = run_id
         self.directory = runs_dir / run_id
         self.state_path = self.directory / "state.json"
         self.lock_path = self.directory / "run.lock"
+        self.credentials = credentials or Credentials()
         _reject_link(runs_dir)
         _reject_link(self.directory)
 
@@ -126,36 +134,48 @@ class RunStore:
             raise PipelineError("Run state is invalid. Restore a valid state.json or start a new run.") from None
         return state
 
-    def status(self) -> RunState | None:
-        # Read a stable snapshot after probing the lock, so a just-finished
-        # invocation is not reported as abandoned.
+    @contextmanager
+    def inspect(self) -> Iterator[bool]:
+        """Expose writer activity while a reader takes a state snapshot."""
         _reject_link(self.lock_path)
         try:
             stream = self.lock_path.open("r+b")
         except FileNotFoundError:
-            state = self.read()
-            active = False
+            yield False
         else:
             with stream:
-                active = not _try_lock(stream)
-                state = self.read()
+                yield not _try_lock(stream)
+
+    def status(self) -> RunState | None:
+        with self.inspect() as active:
+            state = self.read()
         if state is not None and not active:
             mark_interrupted(state)
         return state
 
     def save(self, state: RunState) -> None:
         state.updated_at = timestamp()
-        with NamedTemporaryFile(dir=self.directory, prefix="state-", suffix=".tmp", delete=False) as stream:
+        payload = state.model_dump(mode="json")
+        for key in ("configuration", "runtime", "failure_reason"):
+            payload[key] = self.credentials.redact(payload[key])
+        for stage in payload["stages"].values():
+            stage["error"] = self.credentials.redact(stage["error"])
+        self.write_json(self.state_path.name, payload)
+
+    def write_json(self, name: str, payload: dict[str, object]) -> None:
+        target = self.directory / name
+        _reject_link(target)
+        with NamedTemporaryFile(dir=self.directory, suffix=".partial", delete=False) as stream:
             temporary = Path(stream.name)
             try:
-                stream.write(state.model_dump_json(indent=2).encode("utf-8") + b"\n")
+                stream.write(json.dumps(payload, indent=2, allow_nan=False).encode() + b"\n")
                 stream.flush()
                 os.fsync(stream.fileno())
                 stream.close()
                 # On Windows a concurrent reader can briefly deny replacement.
                 for retry in range(5):
                     try:
-                        temporary.replace(self.state_path)
+                        temporary.replace(target)
                         break
                     except PermissionError:
                         if os.name != "nt" or retry == 4:
@@ -169,7 +189,7 @@ class RunStore:
         path = self.directory / "events.jsonl"
         _reject_link(path)
         with path.open("a", encoding="utf-8", newline="\n") as stream:
-            stream.write(json.dumps(event) + "\n")
+            stream.write(json.dumps(self.credentials.redact(event), allow_nan=False) + "\n")
 
     def artifact_dir(self, name: str, attempt: str) -> Path:
         return self._attempt_dir("artifacts", name, attempt)
@@ -187,6 +207,7 @@ class RunStore:
 def mark_interrupted(state: RunState) -> None:
     if state.status == "running":
         state.status = "interrupted"
+        state.failure_reason = "Execution stopped before recording a final status."
     for record in state.stages.values():
         if record.status == "running":
             record.status = "interrupted"
