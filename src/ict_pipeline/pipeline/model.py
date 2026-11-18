@@ -59,6 +59,7 @@ class StageContext:
     artifact_dir: Path
     progress: Callable[[int, int | None], None]
     input_fingerprints: Mapping[str, str] = field(default_factory=dict)
+    recovery_dir: Path | None = None
 
 
 @dataclass(frozen=True)

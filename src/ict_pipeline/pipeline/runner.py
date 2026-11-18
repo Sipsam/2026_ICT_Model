@@ -80,14 +80,17 @@ class StageRunner:
             )
             forced = set(selection) if force else set()
             self._preflight(store, state, selection, forced)
+            state.recovery_generations.update({name: uuid4().hex for name in forced})
             return self._execute(store, state, selection, forced)
 
-    def resume(self, run_id: str | None = None) -> RunState:
+    def resume(self, run_id: str | None = None, *, expected_updated_at: str | None = None) -> RunState:
         store = self._existing_store(run_id)
         with store.lock():
             state = store.read()
             if state is None:
                 raise PipelineError("Run state is missing. Start a run with ict run.")
+            if expected_updated_at is not None and state.updated_at != expected_updated_at:
+                raise PipelineError("Run state changed while preparing to resume. Inspect its status and retry.")
             selection = self._ordered_selection(tuple(state.selection))
             forced = set(state.pending_force)
             self._preflight(store, state, selection, forced)
@@ -335,6 +338,7 @@ class StageRunner:
             context = StageContext(
                 MappingProxyType(inputs), MappingProxyType(settings), temporary, final, progress,
                 MappingProxyType(input_fingerprints),
+                store.recovery_dir(name, state.recovery_generations.get(name, "initial")),
             )
             try:
                 result = stage.execute(context)

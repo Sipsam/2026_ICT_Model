@@ -3,8 +3,10 @@
 from ...pipeline.model import StageContext, StageFailure, StageResult
 from ..stages import limited_progress
 from .audit import audit_dataset
+from .common import write_json
 from .convert import convert_detection
 from .manifest import build_manifest
+from .policy import label_policy
 from .validate import validate_detection
 
 
@@ -50,4 +52,8 @@ def validate(context: StageContext) -> StageResult:
         raise StageFailure(
             f"Detection validation found {report['issue_count']} issues. Inspect the reports in the failed attempt."
         )
+    write_json(context.output_dir / "receipt.json", {
+        "schema_version": 1, "passed": True, "inputs": dict(context.input_fingerprints),
+        "label_policy": label_policy(),
+    })
     return StageResult.SUCCESS

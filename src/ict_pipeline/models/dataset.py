@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -45,6 +45,7 @@ class DetectionData:
     splits: dict[str, Split]
     split_fingerprints: dict[str, str]
     annotation_fingerprint: str
+    split_annotation_fingerprints: dict[str, str] = field(default_factory=dict)
 
 
 def _read_yolo(root: Path) -> dict[str, Split]:
@@ -165,6 +166,7 @@ def inspect_data(
             raise TrainingError("Train and Validation contain duplicate filenames or image bytes. Review the dataset audit.")
         return DetectionData(
             splits, {name: digest_json(hashes) for name, hashes in membership.items()}, digest_json(annotations),
+            {name: digest_json(hashes) for name, hashes in annotations.items()},
         )
     except (OSError, ValueError, TypeError, KeyError, yaml.YAMLError, RecursionError):
         raise TrainingError(f"Invalid generated {data_format.upper()} dataset. Check the files and rerun detection validation.") from None

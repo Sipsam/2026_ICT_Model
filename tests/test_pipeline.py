@@ -406,7 +406,8 @@ def test_cli_production_preview_and_missing_data(tmp_path: Path, monkeypatch: py
     assert preview.stdout.count("adapter unavailable") == 0
     full = client.invoke(cli.app, ["run", "--from", "download", "--until", "report", "--dry-run"])
     assert full.exit_code == 0, full.output
-    assert full.stdout.count("adapter unavailable") == 6
+    assert full.stdout.count("adapter unavailable") == 2
+    assert all(f"{stage}   run" in full.stdout for stage in ("train", "validate_models", "evaluate", "report"))
     assert list(tmp_path.iterdir()) == []
     result = client.invoke(cli.app, ["run", "--run-id", "production"])
     assert result.exit_code == 1

@@ -116,7 +116,13 @@ def write_report(workspace: Path, root: Path, format: ReportFormat, document: Ru
     protect_source_data(root, workspace)
     root.mkdir(parents=True, exist_ok=True)
     directory = Path(mkdtemp(prefix="report-", dir=root))
-    target = directory / f"comparison.{format.value}"
+    return write_report_file(directory / f"comparison.{format.value}", format, document)
+
+
+def write_report_file(target: Path, format: ReportFormat, document: Run) -> Path:
+    """Render into a fresh artifact path."""
+    if target.exists() or target.is_symlink():
+        raise FileExistsError("Report already exists.")
     partial = target.with_suffix(".partial")
     with partial.open("x", encoding="utf-8", newline="") as stream:
         if format is ReportFormat.JSON:

@@ -45,9 +45,9 @@ Verification commands use the installed `ict.exe` from outside the checkout. A f
 
 The packaged ingestion provider validates archives and chunks before atomic publication. Synthetic tests cover corrupted archives, insufficient disk, cancellation and resume, and the credential channel. The legacy shell entry remains available. Its curl invocation passes the key in an argument and its part-merging path deletes parts. This audit used the installed Python CLI and existing extracted files.
 
-## Detection DAG
+## Detection DAG at audit close
 
-`pipeline/stages.py` declares the downstream nodes and paths. `cli.py` defaults detection runs to `validate_detection`. Selecting the later nodes explicitly reaches entries with `Stage.execute = None`. `StageRunner` rejects those entries on execution. The training approval flag on `ict run` applies to classification. An enabled classification profile has its own executable prepare, fit and evaluate adapters.
+At audit close, `pipeline/stages.py` declared downstream paths without executable detector adapters. The default detection run stopped at `validate_detection`. The classification profile had executable prepare, fit and evaluate adapters with a separate training approval.
 
 | Node and declared output | Existing standalone implementation | Gap |
 | --- | --- | --- |
@@ -56,7 +56,7 @@ The packaged ingestion provider validates archives and chunks before atomic publ
 | `evaluate` → `metrics.json` | `evaluate_runs` and `detection_metrics`, called by `ict evaluate` | The standalone runner publishes per-model fingerprinted reports and resumes at model boundaries. It has no adapter for the declared predictions input or metrics output. |
 | `report` → `report.html` | `ict report`, catalog and export modules | Standalone reporting scans saved runs and writes an export in a fresh directory. A stage must use the selected dependency results and write the declared artifact within its attempt. |
 
-Setup preferences such as `model`, `device`, `training_profile`, and `tracking` do not select a standalone detector's training options. Those come from the standalone command and per-model YAML. The detection DAG currently lists these settings for placeholder invalidation. The packaged training profiles previewed 50 epochs each, so the setup value `smoke` should never be treated as approval or a tiny workload.
+The standalone command takes training options from per-model YAML. The packaged profiles previewed 50 epochs each, including in a workspace whose setup value for `training_profile` was `smoke`.
 
 Settings precedence is covered by local tests for CLI overrides, environment, YAML and packaged defaults. Headless setup wrote only `configs/local.yaml` in the audit workspaces. In the current CLI, pipeline attempts publish under the workspace's `runs`; standalone training, evaluation and reporting accept separate output options. The setup `output_path` value does not route all these commands to a single root.
 
@@ -73,7 +73,7 @@ The common evaluator scores canonical classes on the same labeled COCO images. I
 ## Split integrity and leakage
 
 - The detection conversion preserves Train and Validation by folder provenance. It uses only `candidate` rows, removes normal boxes, retains background images and keeps the five existing class IDs. A candidate still requires ground-truth review. `hold_review` and `exclude` remain outside model inputs.
-- Validation now checks the image names and bytes against each checkpoint's recorded Validation fingerprint. Evaluation reports hash the current COCO labels. They do not yet bind those labels to a training-time Validation label fingerprint across both formats. `ict train --all` checks the format splits and image bytes. The conversion validator checks box and category equivalence. Standalone training does not require the corresponding validation artifact.
+- The audit added a check of Validation image names and bytes against each checkpoint's recorded split. The evaluator hashes the COCO labels. Standalone training accepts generated data without a conversion validation receipt, and checks image membership and bytes across formats with `--all`. The integrated workflow now requires the receipt and records the exact training-time label files for both formats.
 - Train and Validation have exact-byte and filename overlap checks. Detection has no near-duplicate or production-session quarantine. Independent Test is a separate labeled split, with an explicit holdout attestation, verified Train/Validation reference fingerprints and image overlap checks. Neither exact-match checks nor the attestation establish production-group independence by themselves.
 - A read-only scan of all 15,372 extracted annotation JSON files found zero explicit `production_session_id` fields at the document, image or sensor-group level. Filename tokens placed all 13,664 Train and 1,708 Validation rows in four shared source groups. Seven source/day groups covered 10,923 Train rows and all Validation rows. Eleven exact source/capture-token groups covered 11 rows in each split. These are grouping proxies. Production logs are needed to establish whether any pair shares a line, board, or session.
 - Detection audit pairs JSON, JPG and XLSX by stem, checks metadata and image dimensions, and compares XLSX sequence length, timestamps and the five sensor values with embedded JSON. Sensor/image ID offsets are informational. Detection adapters consume pixels and object boxes only.
@@ -90,11 +90,22 @@ The common evaluator scores canonical classes on the same labeled COCO images. I
 
 | Priority | Remaining work |
 | --- | --- |
-| P0 | Bind standalone detector APIs to the stage runner with explicit scoped training approval, per-model YAML fingerprints, verified conversion input, typed checkpoint and prediction artifacts, and interruption recovery. Exercise a tiny full detection DAG through report publication before using it on SMT. |
 | P1 | Extend backend coverage with denser target sets and loss/checkpoint repeatability. Add background-only loss cases to local regression tests. Record full dependency versions and expected operator support per device and precision. |
-| P1 | Record canonical per-split label fingerprints and enforce YOLO/COCO parity at the training boundary. Bind Validation evaluation to the intended label revision. Add reference metric parity cases for tied scores, dense detections and empty images. |
+| P1 | Add reference metric parity cases for tied scores, dense detections and empty images. |
 | P1 | Review SMT candidate ground truth and holds, verify production groups and near duplicates, and freeze an independently grouped Test set and evaluation protocol if generalization claims are needed. |
 | P1 | Run approved bounded real-data training and shared Validation scoring before considering a full training run. Exercise CUDA/ROCm/MPS, Docker and SSH on actual supported targets separately, including interruption and checkpoint portability. |
 | P1 | Measure cold and warm preprocessing I/O and disk growth. The runner hashes inputs and artifacts to check cache integrity. The full mirror audit spent about seven minutes checking final inputs after its sample counter reached 100%. Report hashing progress and improve throughput while preserving byte-level integrity checks. |
 
-The next phase can rely on `ict run` through `validate_detection`, `ict status`, `ict resume`, the published conversion tree, and `Stage` / `StageContext`. Standalone model stages use the `ModelAdapter` and `Predictor` contracts, per-model `run.json`, `best.pt` / `last.pt`, and the fingerprinted evaluation report consumed by `read_report` and `ict report`. The four detection DAG adapters remain open.
+## Detection DAG integration follow-up
+
+`ict run --model <detector>` and `ict run --all` now execute through `report`. The default preprocessing command still ends at `validate_detection`. Detector training requires `--approve-detection-train` for each invocation that needs training. See the [end-to-end commands and artifact locations](../README.md#run-end-to-end-detection).
+
+The stage runner binds the conversion, manifest, label policy, split image bytes, and per-format annotation hashes to the model run. The inference stage records Validation predictions with preprocessing and checkpoint fingerprints. Scoring uses those saved predictions and produces reports compatible with `ict compare`. Model-specific recovery reuses verified completed models and continues verified epoch checkpoints in fresh attempts.
+
+The follow-up used tiny CPU fixtures in temporary workspaces. Each real detector completed the DAG from extracted fixture through reporting. The fixture suite covers the acquisition stages using mock transport. The full SMT dataset was used only for preprocessing in the earlier audit. Docker, remote, and accelerator execution of the integrated DAG remain target-specific acceptance checks.
+
+| Status | Follow-up check on Windows CPU | Observed result |
+| --- | --- | --- |
+| **Passed** | `.venv\Scripts\python.exe -m pytest -q -ra tests/test_e2e.py -k actual_cpu_backend` | 3 passed. Each real backend trained for one epoch and published its Validation predictions, metrics, and report. |
+| **Passed** | `.venv\Scripts\python.exe -m pytest -ra` with the existing temporary backend dependencies on `PYTHONPATH` | 159 passed, 2 skipped in 341.81 s. The opt-in SMT regression and Linux detached worker were skipped. |
+| **Passed** | Installed `ict run --run-id all-cpu --config fixture.yaml --all --config-dir models --evaluation-image-size 64 --approve-detection-train`, then `ict resume --run-id all-cpu --config fixture.yaml` | YOLO, Faster R-CNN, and RT-DETR trained for one epoch each on the same two Train images. The report grouped all three on the same two Validation images. Resume reused all eight stages, including training, without approval. |

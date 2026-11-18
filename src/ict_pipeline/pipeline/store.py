@@ -54,6 +54,7 @@ class RunState(BaseModel):
     status: Status = "running"
     selection: list[str]
     pending_force: list[str]
+    recovery_generations: dict[str, AttemptId] = Field(default_factory=dict)
     stages: dict[str, StageRecord] = Field(default_factory=dict)
     started_at: str | None = None
     finished_at: str | None = None
@@ -196,6 +197,11 @@ class RunStore:
 
     def working_dir(self, name: str, attempt: str) -> Path:
         return self._attempt_dir("work", name, attempt)
+
+    def recovery_dir(self, name: str, generation: str) -> Path:
+        directory = self._attempt_dir("recovery", name, generation)
+        _reject_link(directory)
+        return directory
 
     def _attempt_dir(self, kind: str, name: str, attempt: str) -> Path:
         parent = self.directory / kind

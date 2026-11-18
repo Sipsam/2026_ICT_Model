@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import tarfile
+from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -33,7 +34,7 @@ from ict_pipeline.pipeline.model import StageContext, StageFailure, StageResult
 from ict_pipeline.pipeline.store import RunState, RunStore, fingerprint_path
 
 from test_preprocessing import sample
-from test_training import fake_torch
+from test_training import config_directory, fake_torch, optional_runtime
 
 pytestmark = pytest.mark.e2e
 SECRET = "fixture-key-78e2c47c"
@@ -63,6 +64,10 @@ class Fixture:
         state = RunStore(self.root / "runs", run_id).read()
         assert state is not None
         return state
+
+    def artifact(self, run_id: str, stage: str) -> Path:
+        store = RunStore(self.root / "runs", run_id)
+        return store.artifact_dir(stage, self.state(run_id).stages[stage].attempt)
 
     def assert_redacted(self) -> None:
         for folder in ("configs", "runs", "outputs", "data/raw"):
@@ -331,3 +336,249 @@ def test_corrupt_annotations_preserve_audit_and_can_be_retried(journey: Fixture)
     assert journey.state("broken").stages["audit"].attempt != state.stages["audit"].attempt
     assert fingerprint_path(extracted) == bad_hash
     journey.assert_redacted()
+
+
+@pytest.fixture
+def staged_detectors(monkeypatch: pytest.MonkeyPatch) -> tuple[Counter[ModelName], set[ModelName]]:
+    calls: Counter[ModelName] = Counter()
+    interrupt: set[ModelName] = set()
+
+    @dataclass
+    class Adapter:
+        name: ModelName
+        architecture = "fixture"
+
+        def train(self, request: TrainingRequest) -> Checkpoints:
+            calls[self.name] += 1
+            assert request.device == "cpu"
+            paths = training.checkpoint_paths(self.name, request.output)
+            paths.last.parent.mkdir(exist_ok=True)
+            start = 1
+            if request.resume:
+                start = int(request.resume.last.read_text()) + 1
+            for epoch in range(start, request.config.epochs + 1):
+                for path in (paths.best, paths.last):
+                    path.write_text(str(epoch))
+                request.record_metrics({"epoch": epoch})
+                if self.name in interrupt:
+                    interrupt.remove(self.name)
+                    raise KeyboardInterrupt
+            return paths
+
+    monkeypatch.setattr(training, "import_module", lambda _: fake_torch())
+    monkeypatch.setattr(Backend, "versions", lambda _: {"torch": "fixture"})
+    monkeypatch.setattr(Backend, "load", lambda backend: Adapter(next(
+        name for name, entry in REGISTRY.items() if entry == backend
+    )))
+    monkeypatch.setattr(evaluation, "load_predictor", lambda *_: FixturePredictor())
+    return calls, interrupt
+
+
+def test_detection_dag_all_models_resume_and_invalidate(
+    journey: Fixture, staged_detectors: tuple[Counter[ModelName], set[ModelName]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls, interrupt = staged_detectors
+    monkeypatch.setattr(cli, "provider_for", lambda *_: journey.provider)
+    command("setup", "--non-interactive", "--dataset-source", "aihub", "--data-path", "data/extracted")
+    config = config_directory(journey.root, epochs=2)
+    run = ("run", "--run-id", "full", "--all", "--config-dir", str(config), "--evaluation-image-size", "64")
+    resume = ("resume", "--run-id", "full")
+    approve = "--approve-detection-train"
+    source_hash = fingerprint_path(journey.source)
+    preview = command(*run, "--dry-run", contains="report   run")
+    assert all(f"Detector {name}" in preview for name in REGISTRY)
+    assert not (journey.root / "runs").exists()
+
+    command(*run, "--approve-download", "--approve-train", code=1, contains="requires explicit approval")
+    assert not calls
+    assert journey.state("full").selection == [
+        "download", "extract", "audit", "manifest", "convert", "validate_detection",
+        "train", "validate_models", "evaluate", "report",
+    ]
+    initial = journey.state("full")
+    dataset = journey.artifact("full", "convert") / "detection"
+    conversion_hash = fingerprint_path(dataset)
+    raw_hash = fingerprint_path(journey.root / "data/raw")
+    interrupt.add(ModelName.FASTER_RCNN)
+    command(*resume, approve, code=130, contains="Run cancelled")
+    assert calls == {ModelName.YOLO: 1, ModelName.FASTER_RCNN: 1}
+    stopped = journey.state("full")
+    assert stopped.stages["train"].status == "interrupted"
+    assert not (journey.root / "runs/full/artifacts/train").exists()
+    command(*resume, code=1, contains="Training faster_rcnn requires explicit approval")
+    command(*resume, approve, contains="Detection report")
+    assert calls == {ModelName.YOLO: 1, ModelName.FASTER_RCNN: 2, ModelName.RT_DETR: 1}
+    first = journey.state("full")
+    for stage in initial.selection[:6]:
+        assert initial.stages[stage] == first.stages[stage]
+    assert all(record.status == "completed" for record in first.stages.values())
+    assert journey.provider.requests == [(71900, "train"), (71900, "validation")]
+
+    checkpoints = journey.artifact("full", "train") / "checkpoints"
+    predictions = journey.artifact("full", "validate_models") / "predictions"
+    metrics_dir = journey.artifact("full", "evaluate") / "model_reports"
+    reports = sorted(metrics_dir.glob("*.json"))
+    comparison = evaluation.compare_reports(journey.root, tuple(reports))
+    for name, report in zip(REGISTRY, comparison["models"], strict=True):
+        metadata = json.loads((checkpoints / name / "run.json").read_text(encoding="utf-8"))
+        if name == ModelName.FASTER_RCNN:
+            assert metadata["initialization"] == "resume"
+            assert metadata["metrics"]["epoch"] == 2
+        assert metadata["dataset_revision"]["detection"] == conversion_hash
+        assert metadata["dataset_revision"]["annotations"]["coco"]["val"]
+        for record in metadata["checkpoints"].values():
+            assert fingerprint_path(checkpoints / name / record["path"]) == record["fingerprint"]
+        prediction_file = predictions / f"{name}.json"
+        predicted = evaluation.read_result(prediction_file, "Prediction artifact")
+        assert set(predicted["predictions"]) == {VAL, NORMAL}
+        assert predicted["predictions"][NORMAL]["boxes"] == []
+        assert predicted["checkpoint"]["fingerprint"] == metadata["checkpoints"]["best"]["fingerprint"]
+        assert predicted["dataset"] == report["dataset"]
+        assert report["prediction_fingerprint"] == fingerprint_path(prediction_file)
+        assert report["metrics"]["map50_95"] == 1.0
+    report_dir = journey.artifact("full", "report")
+    document = json.loads((report_dir / "report.json").read_text())
+    assert len(document["comparison_groups"]) == 1
+    assert [row["model"] for row in document["comparison_groups"][0]["models"]] == list(REGISTRY)
+    assert "ICT run comparison" in (report_dir / "report.html").read_text(encoding="utf-8")
+    command("compare", *(str(path) for path in reports), contains="matching_speed_environment")
+    command(*resume, contains="report reused")
+    assert journey.state("full").stages == first.stages
+
+    # Only the modified model profile needs training, even for a byte-only YAML edit.
+    old_artifacts = fingerprint_path(journey.root / "runs/full/artifacts")
+    with (config / "rt_detr.yaml").open("a", encoding="utf-8") as stream:
+        stream.write("# Profile revision\n")
+    command(*resume, code=1, contains="Training rt_detr requires explicit approval")
+    assert fingerprint_path(journey.root / "runs/full/artifacts") == old_artifacts
+    command(*resume, approve, contains="report completed")
+    assert calls == {ModelName.YOLO: 1, ModelName.FASTER_RCNN: 2, ModelName.RT_DETR: 2}
+    second = journey.state("full")
+    for stage in initial.selection[:6]:
+        assert second.stages[stage] == first.stages[stage]
+    assert second.stages["train"].attempt != first.stages["train"].attempt
+
+    # A deliberately altered fixture artifact triggers cache repair.
+    path = journey.artifact("full", "validate_models") / "predictions/yolo.json"
+    path.write_text("{}", encoding="utf-8")
+    with pytest.raises(evaluation.EvaluationError, match="incomplete, corrupt"):
+        evaluation.read_result(path, "Prediction artifact")
+    command(*resume, contains="train reused")
+    third = journey.state("full")
+    assert second.stages["train"] == third.stages["train"]
+    assert second.stages["validate_models"].attempt != third.stages["validate_models"].attempt
+    assert calls == {ModelName.YOLO: 1, ModelName.FASTER_RCNN: 2, ModelName.RT_DETR: 2}
+    assert fingerprint_path(journey.source) == source_hash
+    assert fingerprint_path(dataset) == conversion_hash
+    assert fingerprint_path(journey.root / "data/raw") == raw_hash
+    journey.assert_redacted()
+
+
+def test_detection_dag_fresh_full_run_and_force_recovery(
+    journey: Fixture, staged_detectors: tuple[Counter[ModelName], set[ModelName]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls, interrupt = staged_detectors
+    monkeypatch.setattr(cli, "provider_for", lambda *_: journey.provider)
+    command("setup", "--non-interactive", "--dataset-source", "aihub", "--data-path", "data/extracted")
+    config = config_directory(journey.root)
+    options = ("--run-id", "fresh", "--model", "yolo", "--config-dir", str(config), "--evaluation-image-size", "64")
+    approve = "--approve-detection-train"
+    command("run", *options, "--approve-download", approve, contains="Detection report")
+    first = journey.state("fresh")
+    assert len(first.stages) == 10 and first.status == "completed"
+    assert calls == {ModelName.YOLO: 1}
+
+    def unexpected_inference(*args: object) -> None:
+        raise AssertionError("Scoring should read the published predictions.")
+
+    monkeypatch.setattr(evaluation, "load_predictor", unexpected_inference)
+    command("run", *options, "--only", "evaluate", "--force", contains="Detection metrics")
+    forced = journey.state("fresh")
+    assert forced.stages["train"] == first.stages["train"]
+    assert forced.stages["validate_models"] == first.stages["validate_models"]
+    before = RunStore(journey.root / "runs", "fresh").artifact_dir("evaluate", first.stages["evaluate"].attempt)
+    after = journey.artifact("fresh", "evaluate")
+    assert evaluation.read_report(before / "model_reports/01-yolo.json")["metrics"] == evaluation.read_report(
+        after / "model_reports/01-yolo.json"
+    )["metrics"]
+
+    # Force opens a fresh generation. A fully checkpointed final epoch can be
+    # finalized on the next approved attempt without running another epoch.
+    command("run", *options, "--only", "train", "--force", code=1, contains="requires explicit approval")
+    assert calls == {ModelName.YOLO: 1}
+    interrupt.add(ModelName.YOLO)
+    command("resume", "--run-id", "fresh", approve, code=130, contains="Run cancelled")
+    command("resume", "--run-id", "fresh", approve, contains="Detector checkpoints")
+    assert calls == {ModelName.YOLO: 2}
+    assert journey.state("fresh").stages["train"].attempt != first.stages["train"].attempt
+
+
+def test_detection_dag_rejects_mismatched_labels_and_bad_predictions(
+    journey: Fixture, staged_detectors: tuple[Counter[ModelName], set[ModelName]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls, _ = staged_detectors
+    command("setup", "--non-interactive", "--dataset-source", "skip", "--data-path", str(journey.source))
+    configuration = config_directory(journey.root)
+    args = ("run", "--run-id", "single", "--model", "faster_rcnn", "--config-dir", str(configuration),
+            "--evaluation-image-size", "64", "--approve-detection-train")
+    convert = stages.convert
+
+    def inconsistent(context: StageContext) -> StageResult:
+        result = convert(context)
+        label = context.output_dir / f"detection/yolo/labels/val/{VAL}.txt"
+        label.write_text(label.read_text().replace("0 ", "1 ", 1))
+        return result
+
+    monkeypatch.setattr(stages, "convert", inconsistent)
+    command(*args, code=1, contains="Detection validation found")
+    assert not calls
+    assert "train" not in journey.state("single").stages
+    monkeypatch.setattr(stages, "convert", convert)
+    monkeypatch.setattr(evaluation, "load_predictor", lambda *_: SimpleNamespace(
+        hardware={}, postprocessing={}, libraries={}, synchronize=lambda: None,
+        predict=lambda sample: Prediction("wrong", (), (), (), Preprocessing((sample.width, sample.height),
+                                                                              (64, 64), "aspect_ratio")),
+    ))
+    command(*args, "--force", code=1, contains="Prediction rows or preprocessing metadata")
+    assert calls == {ModelName.FASTER_RCNN: 1}
+    assert not (journey.root / "runs/single/artifacts/validate_models").exists()
+    monkeypatch.setattr(evaluation, "load_predictor", lambda *_: FixturePredictor())
+    command("resume", "--run-id", "single", contains="Detection report")
+    assert calls == {ModelName.FASTER_RCNN: 1}
+    report = journey.artifact("single", "evaluate") / "model_reports/01-faster_rcnn.json"
+    assert evaluation.read_report(report)["metrics"]["map50_95"] == 1.0
+    dataset = journey.artifact("single", "convert") / "detection"
+    model = journey.artifact("single", "train") / "checkpoints/faster_rcnn"
+    changed = shutil.copytree(dataset, journey.root / "changed-labels")
+    annotation = changed / "coco/annotations/instances_val.json"
+    data = json.loads(annotation.read_text())
+    data["annotations"][0]["category_id"] = 2
+    annotation.write_text(json.dumps(data), encoding="utf-8")
+    command("evaluate", "--run", str(model), "--dataset", str(changed), code=1, contains="verified detection revision")
+
+
+@pytest.mark.parametrize("name", tuple(REGISTRY))
+def test_detection_dag_actual_cpu_backend(name: ModelName, journey: Fixture) -> None:
+    torch = optional_runtime(name)
+    sample(journey.source, "train", "SD_NOR_CC_ACME_20240101_004", "cold_solder", (7,), color=64)
+    config = config_directory(journey.root)
+    command("setup", "--non-interactive", "--dataset-source", "skip", "--data-path", str(journey.source))
+    threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        command(
+            "run", "--run-id", "cpu", "--model", name, "--config-dir", str(config),
+            "--evaluation-image-size", "64", "--approve-detection-train", contains="Detection report",
+        )
+        model_report, = (journey.artifact("cpu", "evaluate") / "model_reports").glob("*.json")
+        report = evaluation.read_report(model_report)
+        assert report["model"] == name
+        assert report["speed"]["hardware"]["device"] == "cpu"
+        assert report["dataset"]["image_count"] == report["speed"]["timed_images"] == 2
+        assert 0 <= report["metrics"]["map50_95"] <= 1
+        command("resume", "--run-id", "cpu", contains="train reused")
+    finally:
+        torch.set_num_threads(threads)

@@ -2,6 +2,7 @@
 
 import json
 import os
+from dataclasses import dataclass
 from importlib.metadata import version
 from pathlib import Path
 from time import monotonic
@@ -23,6 +24,7 @@ from .environment.model import EnvironmentReport
 from .evaluation.contracts import EvaluationConfig, EvaluationError, EvaluationSplit
 from .models.contracts import ModelName, TrainingError
 from .pipeline import PipelineError, StageRunner
+from .pipeline.detection import DETECTION_STAGES, DetectionStages
 from .pipeline.model import valid_id
 from .pipeline.runner import StageEvent
 from .pipeline.stages import CLASSIFICATION_STAGES, pipeline_stages
@@ -198,9 +200,23 @@ def _pipeline_progress(event: StageEvent) -> None:
     )
 
 
+EvaluationDevice = Literal["cpu", "cuda", "rocm", "mps"]
+
+
+@dataclass(frozen=True)
+class DetectorOptions:
+    model: ModelName | None
+    all_models: bool
+    config_dir: Path | None
+    evaluation_image_size: int
+    evaluation_device: EvaluationDevice
+
+
 def _pipeline(
     config: Path | None, run_id: str | None, approve_download: bool = False, approve_train: bool = False,
-) -> StageRunner:
+    *, detector_options: DetectorOptions | None = None, approve_detection: bool = False,
+    resume: bool = False,
+) -> tuple[StageRunner, DetectionStages | None, RunState | None]:
     from .config.storage import SetupFiles
 
     root = Path.cwd()
@@ -238,14 +254,46 @@ def _pipeline(
             acquisition, provider_for(credentials, os.environ), existing, approve_download,
             lambda missing: show_download_plan(acquisition, missing),
         )
-    if data is not None:
-        stages = pipeline_stages(data, classification=resolved.classification, approve_train=approve_train)
-    else:
+    def build(detectors: DetectionStages | None) -> StageRunner:
         stages = pipeline_stages(
-            dataset_root=Path(settings["data_path"]), classification=resolved.classification,
-            approve_train=approve_train,
+            data=data, dataset_root=Path(settings["data_path"]) if data is None else None,
+            classification=resolved.classification, approve_train=approve_train, detectors=detectors,
         )
-    return StageRunner(stages, root, settings, on_event=_pipeline_progress, credentials=credentials)
+        return StageRunner(stages, root, settings, on_event=_pipeline_progress, credentials=credentials)
+
+    saved = None
+    if resume:
+        runner = build(None)
+        saved = runner.status(run_id)
+        if not set(saved.selection).intersection(DETECTION_STAGES) or "detection_training" not in saved.configuration:
+            return runner, None, saved
+        training = saved.configuration["detection_training"]
+        names = tuple(ModelName(name) for name in training["models"])
+        directory = Path(training["config_dir"]) if training["config_dir"] is not None else None
+        benchmark = EvaluationConfig.model_validate(saved.configuration["detection_evaluation"])
+    elif detector_options is not None:
+        names = tuple(ModelName) if detector_options.all_models else (detector_options.model or ModelName(resolved.model),)
+        directory = detector_options.config_dir
+        try:
+            benchmark = EvaluationConfig(
+                image_size=detector_options.evaluation_image_size, device=detector_options.evaluation_device,
+            )
+        except ValueError:
+            raise SetupError("Evaluation image size must be a multiple of 32 and at least 64.") from None
+    else:
+        return build(None), None, None
+    if directory is not None:
+        credentials.protect_path(str(directory), "detector config directory")
+        directory = (root / directory).resolve()
+        credentials.protect_path(str(directory), "resolved detector config directory")
+    settings["detection_training"] = {
+        "models": [name.value for name in names], "config_dir": directory.as_posix() if directory else None,
+    }
+    settings["detection_evaluation"] = benchmark.model_dump(mode="json")
+    detectors = DetectionStages.configure(
+        root, credentials, names, directory, benchmark, approve_detection, typer.echo,
+    )
+    return build(detectors), detectors, saved
 
 
 def _pipeline_failure(exc: Exception) -> NoReturn:
@@ -262,26 +310,36 @@ ApprovalOption = Annotated[bool, typer.Option("--approve-download", help="Author
 ClassificationApproval = Annotated[
     bool, typer.Option("--approve-train", help="Authorize CPU image-level classification training.")
 ]
+DetectionApproval = Annotated[
+    bool, typer.Option("--approve-detection-train", help="Authorize the selected detector training for this invocation.")
+]
 
 
 def _print_completed(runner: StageRunner, state: RunState) -> None:
     typer.echo(f"Run {state.run_id} completed.")
+    store = RunStore(runner.runs_dir, state.run_id)
     if "convert" in state.selection:
-        store = RunStore(runner.runs_dir, state.run_id)
         detection = store.artifact_dir("convert", state.stages["convert"].attempt) / "detection"
         typer.echo(f"Detection dataset   {detection}")
+    for stage, label, path in (
+        ("train", "Detector checkpoints", "checkpoints"),
+        ("validate_models", "Validation predictions", "predictions"),
+        ("evaluate", "Detection metrics", "metrics.json"),
+        ("report", "Detection report", "report.html"),
+    ):
+        if stage in state.selection:
+            record = state.stages[stage]
+            typer.echo(f"{label}   {store.artifact_dir(stage, record.attempt) / path}")
     evaluated = CLASSIFICATION_STAGES[-1]
     if evaluated in state.selection:
-        store = RunStore(runner.runs_dir, state.run_id)
         comparison = store.artifact_dir(evaluated, state.stages[evaluated].attempt) / "comparison.json"
         typer.echo(f"Classification comparison   {comparison}")
     elif (prepared := CLASSIFICATION_STAGES[0]) in state.selection:
-        store = RunStore(runner.runs_dir, state.run_id)
         alignment = store.artifact_dir(prepared, state.stages[prepared].attempt) / "alignment.json"
         typer.echo(f"Classification alignment   {alignment}")
 
 
-@app.command(help="Prepare detection data, run configured classification, or select specific stages.")
+@app.command(help="Run detection preprocessing or the complete detector workflow, or select specific stages.")
 def run(
     dry_run: Annotated[bool, typer.Option(help="Print the plan without writing run files.")] = False,
     start: Annotated[str | None, typer.Option("--from", help="First stage in the range.")] = None,
@@ -292,9 +350,25 @@ def run(
     config: ConfigOption = None,
     approve_download: ApprovalOption = False,
     approve_train: ClassificationApproval = False,
+    approve_detection_train: DetectionApproval = False,
+    model: Annotated[ModelName | None, typer.Option(help="Select one detector and run through report by default.")] = None,
+    all_models: Annotated[bool, typer.Option("--all", help="Select all three detectors sequentially.")] = False,
+    config_dir: Annotated[Path | None, typer.Option(help="Read detector YAML profiles from this directory.")] = None,
+    evaluation_image_size: Annotated[int, typer.Option(help="Shared Validation inference image size.")] = 640,
+    evaluation_device: Annotated[EvaluationDevice, typer.Option(help="Shared Validation inference device.")] = "cpu",
 ) -> None:
+    if model is not None and all_models:
+        raise typer.BadParameter("Select --model or --all.")
+    if (model is not None or all_models) and until is None and not only:
+        until = "report"
+    options = None
+    if start in DETECTION_STAGES or until in DETECTION_STAGES or set(only or ()).intersection(DETECTION_STAGES):
+        options = DetectorOptions(model, all_models, config_dir, evaluation_image_size, evaluation_device)
     try:
-        runner = _pipeline(config, run_id, approve_download, approve_train)
+        runner, detectors, _ = _pipeline(
+            config, run_id, approve_download, approve_train,
+            detector_options=options, approve_detection=approve_detection_train,
+        )
         if (
             not only and start is None and CLASSIFICATION_STAGES[0] in runner.graph.stages
             and (until is None or until in CLASSIFICATION_STAGES)
@@ -310,18 +384,24 @@ def run(
                 start = "audit"
             if until is None and (start is None or start in preparation):
                 until = "validate_detection"
+            elif until is None and start in DETECTION_STAGES:
+                until = "report"
         selection = runner.graph.select(start, until, only or ())
         if (dry_run or approve_train) and CLASSIFICATION_STAGES[1] in selection:
             typer.echo(f"Classification training   CPU   artifacts under {runner.runs_dir}")
         if dry_run:
             for step in runner.plan(selection, run_id=run_id, force=force):
                 typer.echo(f"{step.stage}   {step.action}")
+            if detectors and "train" in selection:
+                detectors.describe_training(
+                    "the verified detection conversion", runner.runs_dir / (run_id or "<id>") / "artifacts/train",
+                )
             return
         run_id = uuid4().hex if run_id is None else run_id
         if valid_id(run_id):
             typer.echo(f"Run ID   {run_id}")
         _print_completed(runner, runner.run(run_id, selection, force=force))
-    except (PipelineError, SetupError, DataError, OSError, ValueError) as exc:
+    except (PipelineError, SetupError, DataError, TrainingError, OSError, ValueError) as exc:
         _pipeline_failure(exc)
     except KeyboardInterrupt:
         typer.echo("Run cancelled. Use ict status and ict resume to continue.", err=True)
@@ -332,11 +412,15 @@ def run(
 def resume(
     run_id: RunIdOption = None, config: ConfigOption = None, approve_download: ApprovalOption = False,
     approve_train: ClassificationApproval = False,
+    approve_detection_train: DetectionApproval = False,
 ) -> None:
     try:
-        runner = _pipeline(config, run_id, approve_download, approve_train)
-        _print_completed(runner, runner.resume(run_id))
-    except (PipelineError, SetupError, DataError, OSError, ValueError) as exc:
+        runner, _, saved = _pipeline(
+            config, run_id, approve_download, approve_train, resume=True, approve_detection=approve_detection_train,
+        )
+        assert saved is not None
+        _print_completed(runner, runner.resume(saved.run_id, expected_updated_at=saved.updated_at))
+    except (PipelineError, SetupError, DataError, TrainingError, OSError, ValueError) as exc:
         _pipeline_failure(exc)
     except KeyboardInterrupt:
         typer.echo("Run cancelled. Use ict status and ict resume to continue.", err=True)

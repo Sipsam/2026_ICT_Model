@@ -97,13 +97,41 @@ ict resume --run-id <id>
 
 By default, `ict run` completes preprocessing through `validate_detection`. With `dataset_source: skip`, it starts at `audit` and reads the configured extracted tree in place, defaulting to `data/extracted`. With `dataset_source: aihub` or `dataset_source: existing` it starts at `download`. Ingestion publishes `archives/` and `dataset/` under the corresponding attempt directories. If an extracted dataset is selected for ingestion, the download stage records reuse and the extract stage copies the selected files into the run artifact.
 
-`ict run` and `ict resume` work with closed stdin. For missing transfers, review `ict data download` and pass `--approve-download` to authorize acquisition for that invocation. Pass the same flag to `ict resume` if transfers are still missing. Pass `--run-id <id>` to choose a name or reuse that run's cache. `--from` and `--until` select an inclusive range in dependency order. Repeat `--only` to select individual stages. Any omitted prerequisite must have a valid result in the same run. `--force` recomputes the selection in new artifact directories. The DAG reserves `train`, `validate_models`, `evaluate`, and `report`. Use the standalone commands for model work and reporting.
+`ict run` and `ict resume` work with closed stdin. For missing transfers, review `ict data download` and pass `--approve-download` to authorize acquisition for that invocation. Pass the same flag to `ict resume` if transfers are still missing. Pass `--run-id <id>` to choose a name or reuse that run's cache. `--from` and `--until` select an inclusive range in dependency order. Repeat `--only` to select individual stages. Any omitted prerequisite must have a valid result in the same run. `--force` recomputes the selection in new artifact directories.
 
 `ict status` shows the latest recorded attempt per stage for a pipeline run. Use `--run-id <id>` to select it when training or evaluation has a newer record. `ict resume` defaults to the latest pipeline run and rechecks settings, inputs, stage versions, and artifact bytes before reuse. If you ran with `--config`, pass the same file to `resume` to use that profile again.
 
 Each run stores an atomic snapshot in `runs/<id>/state.json` and a structured event log in `events.jsonl`. A stage writes to `work/<stage>/<attempt>/`. After output verification, the runner publishes the directory under `artifacts/<stage>/<attempt>/` and commits the successful attempt to state. Failed and abandoned attempts remain available for inspection. Only an attempt recorded as completed and verified against its fingerprints is eligible for cache reuse. A lock allows one writer per run, and the OS releases it when the process exits. Cancellation returns status `130`. Progress includes elapsed time and an ETA when the stage reports measurable work.
 
-The Python adapter interface is `Stage`, `StageInput`, `StageContext`, and `StageResult` in `ict_pipeline.pipeline`. An adapter should read the declared inputs, write artifacts exclusively to `StageContext.output_dir`, and report progress as completed and total units. `StageContext.artifact_dir` is the future published path for files that must refer to it. `StageContext.input_fingerprints` provides the verified content hash for each declared input. Adapters own data-format validation and must keep secrets out of outputs and console messages. Bump `Stage.version` when changes to an adapter affect the validity of its results.
+The Python adapter interface is `Stage`, `StageInput`, `StageContext`, and `StageResult` in `ict_pipeline.pipeline`. An adapter reads its declared inputs, writes publishable artifacts to `StageContext.output_dir`, and reports progress as completed and total units. `StageContext.artifact_dir` is the future published path for files that must refer to it. `StageContext.input_fingerprints` provides the verified content hash for each declared input. The optional `StageContext.recovery_dir` provides run-local storage for verified checkpoint recovery across attempts. Adapters own data-format validation and must keep secrets out of outputs and console messages. Bump `Stage.version` when changes to an adapter affect the validity of its results.
+
+## Run end-to-end detection
+
+Use an already extracted fixture and model-specific YAML profiles in `configs/models`. For a bounded CPU smoke run, set `epochs: 1`, `batch_size: 2`, `image_size: 64`, and `device: cpu` in each selected profile. Include at least one labeled object in each split and use distinct images across splits. Packaged profiles use 50 epochs.
+
+```text
+ict setup --non-interactive --dataset-source skip --data-path path/to/extracted-fixture
+ict run --run-id detector-fixture --model faster_rcnn --config-dir configs/models --evaluation-image-size 64 --dry-run
+ict run --run-id detector-fixture --model faster_rcnn --config-dir configs/models --evaluation-image-size 64 --approve-detection-train
+ict status --run-id detector-fixture
+ict resume --run-id detector-fixture
+```
+
+Use `--model yolo`, `--model faster_rcnn`, `--model rt_detr`, or `--all` to run through `report`. With `--until report` and no model flag, the run uses the setup model. For AI Hub or existing-archive profiles, the graph starts at `download` and `extract`. With `dataset_source: skip`, it starts at `audit`. If a run already completed preprocessing, append `--from train` to the detector command and use that run ID to reuse verified prerequisites. The selected YAML controls each training device. `--evaluation-device` and `--evaluation-image-size` set the shared Validation inference options and default to CPU and 640.
+
+To run individual stages against a saved detector run, repeat the original model, profile directory, and evaluation options with `ict run --only <stage>`. Use `ict resume` to repeat the saved selection and options.
+
+`--approve-detection-train` authorizes the selected detector profiles for that invocation. Use the dry run to review the models, resolved settings, YAML hashes, and output root. A resume restores the saved model selection, profile directory, and evaluation settings. It reads the current YAMLs again. Pass `--approve-detection-train` again when a model still needs to train or a profile has changed. Completed stages and verified completed models can be reused without training approval. Classification training and missing dataset transfers have their own approval flags. `--force` with `train` in the selection starts a fresh training generation and requires approval.
+
+| Stage | Published artifacts |
+|---|---|
+| `validate_detection` | `receipt.json` binds the successful YOLO/COCO label equivalence check to the conversion, manifest, and label policy. |
+| `train` | `checkpoints/<model>/run.json`, best and last checkpoints, and fingerprints for the verified dataset, both split label formats, model YAML, code, and runtime. |
+| `validate_models` | `predictions/<model>.json` with a schema version, content fingerprint, sample IDs, original-image boxes, classes, scores, preprocessing, timing, and checkpoint and dataset provenance. Validation includes background images. |
+| `evaluate` | `metrics.json` and `model_reports/*.json` with the scored Validation metrics and prediction fingerprints. Pass the individual JSON reports to `ict compare`. |
+| `report` | `report.html` and `report.json` for the selected results. The CLI prints the HTML path. |
+
+Training resumes from each model's latest verified epoch checkpoint. The runner stores the underlying training attempts under `runs/<id>/recovery/train/`, including backend working files and the private YOLO dataset copy. A model without a verified recovery checkpoint needs a fresh approved attempt. Validation inference restarts its stage if interrupted. Published outputs use new attempt directories when a stage needs to be rebuilt.
 
 ## Train detection models
 
@@ -129,7 +157,7 @@ Copy the packaged [YOLO](src/ict_pipeline/models/yolo.yaml), [Faster R-CNN](src/
 
 `runs/training/<id>/<model>/run.json` records status, config, library and code versions, split and annotation fingerprints, the label policy, and relative paths and fingerprints for `best.pt` and `last.pt`. A new run gets a new ID. To resume an unfinished model, pass `--resume-from <model-run-directory>`, the original dataset and config, and `--approve-train`. Resume starts after the last saved epoch in a new directory. COCO checkpoints restore the model, optimizer and scaler and reconstruct the epoch seed. YOLO uses native training-state restoration from its EMA checkpoint and may produce a different trajectory from an uninterrupted run. Resume only from your own trusted runs because native Ultralytics checkpoints contain pickled objects.
 
-The Python entry points are `ict_pipeline.models.contracts.ModelAdapter`, `TrainingRequest`, and `Checkpoints`, and `ict_pipeline.models.registry.REGISTRY`. Training within `ict run` remains planned.
+The Python entry points are `ict_pipeline.models.contracts.ModelAdapter`, `TrainingRequest`, and `Checkpoints`, and `ict_pipeline.models.registry.REGISTRY`. The stage runner uses the same training implementation.
 
 ## Evaluate and compare detectors
 
@@ -140,7 +168,7 @@ ict compare outputs/evaluation/<attempt>/01-yolo.json outputs/evaluation/<attemp
 
 Pass one or more trusted, completed ICT model run directories and use the same backend extras as training. Ultralytics checkpoints can contain pickled objects. Evaluation verifies each checkpoint against its training record and defaults to `--checkpoint best`. Use `--checkpoint last` to evaluate the final saved weights. Every model infers on all images listed in the same COCO annotation file, including normal images that have zero target boxes. COCO files must use the canonical five classes, original-image pixel coordinates, and non-crowd boxes. Evaluation requires at least one ground-truth object in the selected split.
 
-The default `--split val` reads `coco/annotations/instances_val.json` and `coco/images/val/` under `--dataset`. Image names and bytes must match the Validation split recorded by every model run. Reports identify Validation as `validation_for_tuning` and record the evaluation annotation fingerprint. For a separately prepared Test set, put its labels and images in the corresponding `instances_test.json` and `coco/images/test/` paths. Use `--split test --held-out` only after independently holding out Test and freezing model and protocol choices using Train and Validation. Provide the original detection directory with `--reference-dataset` if Test lives in a different directory. The command verifies the reference image fingerprints against every model's recorded Train and Validation and rejects shared filenames or byte-identical images. The holdout attestation covers production groups, near duplicates and prior tuning history, which these file checks cannot establish.
+The default `--split val` reads `coco/annotations/instances_val.json` and `coco/images/val/` under `--dataset`. Image names and bytes must match the Validation split recorded by every model run. Checkpoints from the integrated DAG also require the exact converted dataset revision recorded at training. Reports identify Validation as `validation_for_tuning` and record the evaluation annotation fingerprint. For a separately prepared Test set, put its labels and images in the corresponding `instances_test.json` and `coco/images/test/` paths. Use `--split test --held-out` only after independently holding out Test and freezing model and protocol choices using Train and Validation. Provide the original detection directory with `--reference-dataset` if Test lives in a different directory. The command verifies the reference image fingerprints against every model's recorded Train and Validation and rejects shared filenames or byte-identical images. The holdout attestation covers production groups, near duplicates and prior tuning history, which these file checks cannot establish.
 
 The evaluator uses COCO bbox AP across all sizes, with 101 interpolated recall points, IoU thresholds from 0.50 to 0.95 in steps of 0.05, and at most 100 predictions per image and class. AP uses scores at or above `--score-floor` (default 0.001). Classes absent from ground truth have null AP and are excluded from the mAP average. Precision, recall and F1 use class-aware, score-ordered matching at `--confidence` (default 0.25) and `--match-iou` (default 0.5), with per-class counts and micro-averaged totals. The confusion matrix matches by IoU regardless of predicted class at that same operating point. Its rows are ground truth and its columns are predictions. The background row counts unmatched predictions and the background column counts missed objects. [COCO reference evaluator](https://github.com/cocodataset/cocoapi/blob/master/PythonAPI/pycocotools/cocoeval.py).
 
@@ -286,7 +314,7 @@ python -m pip install -e ".[test]"
 python -m pytest
 ```
 
-The tests generate tiny JPG, JSON, and XLSX fixtures in temporary directories and require no AI Hub dataset, credentials, GPU, or hosted runner. Run `python -m pytest -m e2e` for the fixture-based CLI journey. It uses local mock acquisition and model adapters with real preprocessing, checkpoint verification, evaluation scoring, and report export. Optional backend smoke tests use one tiny CPU epoch when compatible training dependencies are already installed.
+The tests generate tiny JPG, JSON, and XLSX fixtures in temporary directories and require no AI Hub dataset, credentials, GPU, or hosted runner. Run `python -m pytest -m e2e` for the fixture-based CLI journey. It covers mock acquisition and training, real preprocessing, checkpoint verification, prediction integrity, evaluation scoring, and report export. Run `python -m pytest tests/test_e2e.py -k actual_cpu_backend` to exercise each installed detector through the DAG with a one-epoch CPU fixture.
 
 See the [integration audit](docs/integration-audit.md) for executed checks, backend coverage, and the remaining work for a real-data model run.
 
