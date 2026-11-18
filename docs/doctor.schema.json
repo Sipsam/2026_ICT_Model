@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ICT doctor report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "host", "python", "resources", "graphics", "torch", "tools", "execution_modes", "recommendations"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "host": {"$ref": "#/$defs/host"},
+    "python": {"$ref": "#/$defs/python"},
+    "resources": {"$ref": "#/$defs/resources"},
+    "graphics": {"$ref": "#/$defs/graphics"},
+    "torch": {"$ref": "#/$defs/torch"},
+    "tools": {"$ref": "#/$defs/tools"},
+    "execution_modes": {"$ref": "#/$defs/execution_modes"},
+    "recommendations": {"type": "array", "items": {"type": "string"}}
+  },
+  "$defs": {
+    "status": {"enum": ["available", "unavailable", "unknown"]},
+    "optional_string": {"type": ["string", "null"]},
+    "optional_bytes": {"type": ["integer", "null"], "minimum": 0},
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "release", "architecture", "wsl", "container"],
+      "properties": {
+        "os": {"type": "string"},
+        "release": {"$ref": "#/$defs/optional_string"},
+        "architecture": {"$ref": "#/$defs/optional_string"},
+        "wsl": {"type": ["boolean", "null"]},
+        "container": {"type": ["boolean", "null"]}
+      }
+    },
+    "python": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "implementation", "venv"],
+      "properties": {
+        "version": {"type": "string"},
+        "implementation": {"type": "string"},
+        "venv": {"type": "boolean"}
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu_model", "logical_cpus", "ram_bytes", "working_directory_free_bytes"],
+      "properties": {
+        "cpu_model": {"$ref": "#/$defs/optional_string"},
+        "logical_cpus": {"type": ["integer", "null"], "minimum": 1},
+        "ram_bytes": {"$ref": "#/$defs/optional_bytes"},
+        "working_directory_free_bytes": {"$ref": "#/$defs/optional_bytes"}
+      }
+    },
+    "gpu": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vendor", "model", "vram_bytes"],
+      "properties": {
+        "vendor": {"$ref": "#/$defs/optional_string"},
+        "model": {"$ref": "#/$defs/optional_string"},
+        "vram_bytes": {"$ref": "#/$defs/optional_bytes"}
+      }
+    },
+    "graphics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inventory", "devices", "nvidia_smi", "nvidia_driver"],
+      "properties": {
+        "inventory": {"$ref": "#/$defs/status"},
+        "devices": {"type": "array", "items": {"$ref": "#/$defs/gpu"}},
+        "nvidia_smi": {"$ref": "#/$defs/status"},
+        "nvidia_driver": {"$ref": "#/$defs/optional_string"}
+      }
+    },
+    "backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["availability", "readiness"],
+      "properties": {
+        "availability": {"$ref": "#/$defs/status"},
+        "readiness": {"$ref": "#/$defs/status"}
+      }
+    },
+    "torch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "detail", "version", "cuda_build", "rocm_build", "cpu", "cuda", "rocm", "mps"],
+      "properties": {
+        "status": {"$ref": "#/$defs/status"},
+        "detail": {"enum": ["not_installed", "import_failed", "probe_failed_or_timed_out", null]},
+        "version": {"$ref": "#/$defs/optional_string"},
+        "cuda_build": {"$ref": "#/$defs/optional_string"},
+        "rocm_build": {"$ref": "#/$defs/optional_string"},
+        "cpu": {"$ref": "#/$defs/backend"},
+        "cuda": {"$ref": "#/$defs/backend"},
+        "rocm": {"$ref": "#/$defs/backend"},
+        "mps": {"$ref": "#/$defs/backend"}
+      }
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["git", "curl", "unzip", "docker", "wsl", "aihubshell"],
+      "properties": {
+        "git": {"$ref": "#/$defs/status"},
+        "curl": {"$ref": "#/$defs/status"},
+        "unzip": {"$ref": "#/$defs/status"},
+        "docker": {"$ref": "#/$defs/status"},
+        "wsl": {"$ref": "#/$defs/status"},
+        "aihubshell": {"$ref": "#/$defs/status"}
+      }
+    },
+    "execution_modes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["local_cpu", "torch_cpu", "torch_cuda", "torch_rocm", "torch_mps", "wsl", "container"],
+      "properties": {
+        "local_cpu": {"$ref": "#/$defs/status"},
+        "torch_cpu": {"$ref": "#/$defs/status"},
+        "torch_cuda": {"$ref": "#/$defs/status"},
+        "torch_rocm": {"$ref": "#/$defs/status"},
+        "torch_mps": {"$ref": "#/$defs/status"},
+        "wsl": {"$ref": "#/$defs/status"},
+        "container": {"$ref": "#/$defs/status"}
+      }
+    }
+  }
+}

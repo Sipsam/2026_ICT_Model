@@ -1,10 +1,17 @@
 """Command-line interface for the ICT pipeline."""
 
+import json
 from importlib.metadata import version
+from pathlib import Path
 from typing import Annotated, NoReturn
 
 import typer
 from rich.console import Console
+from rich.table import Table
+from rich.text import Text
+
+from .environment.doctor import collect_environment
+from .environment.model import EnvironmentReport
 
 app = typer.Typer(
     name="ict",
@@ -40,9 +47,76 @@ def _not_implemented(command: str) -> NoReturn:
     raise typer.Exit(code=1)
 
 
-@app.command(help="Check the local runtime (planned).")
-def doctor() -> None:
-    _not_implemented("doctor")
+def _display_value(value: str | int | bool | None) -> str:
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    return "unknown" if value is None else str(value)
+
+
+def _display_bytes(value: int | None) -> str:
+    return "unknown" if value is None else f"{value / 1024**3:,.2f} GiB"
+
+
+def _print_environment(report: EnvironmentReport) -> None:
+    host, python, resources = report.host, report.python, report.resources
+    graphics, torch = report.graphics, report.torch
+    torch_info = torch.version or (torch.detail or "version unknown").replace("_", " ")
+    table = Table(title="ICT environment", show_header=False)
+    table.add_column(style="cyan")
+    table.add_column()
+    rows = [
+        ("OS", host.os),
+        ("OS/kernel release", _display_value(host.release)),
+        ("Architecture", _display_value(host.architecture)),
+        ("In WSL", _display_value(host.wsl)),
+        ("In container", _display_value(host.container)),
+        ("Python", f"{python.implementation} {python.version}"),
+        ("Python venv", _display_value(python.venv)),
+        ("CPU", _display_value(resources.cpu_model)),
+        ("Logical CPUs", _display_value(resources.logical_cpus)),
+        ("RAM", _display_bytes(resources.ram_bytes)),
+        ("Free disk (working directory)", _display_bytes(resources.working_directory_free_bytes)),
+        ("GPU inventory", graphics.inventory),
+    ]
+    for gpu in graphics.devices:
+        rows.append((
+            "GPU",
+            f"{_display_value(gpu.vendor)} / {_display_value(gpu.model)} / {_display_bytes(gpu.vram_bytes)} VRAM",
+        ))
+    rows.extend([
+        ("nvidia-smi probe", graphics.nvidia_smi),
+        ("NVIDIA driver", _display_value(graphics.nvidia_driver)),
+        ("PyTorch", f"{torch.status} ({torch_info})"),
+        ("CUDA build", _display_value(torch.cuda_build)),
+        ("ROCm build", _display_value(torch.rocm_build)),
+    ])
+    for name, backend in (("CPU", torch.cpu), ("CUDA", torch.cuda), ("ROCm", torch.rocm), ("MPS", torch.mps)):
+        rows.append((f"PyTorch {name}", f"Availability  {backend.availability}\nReadiness     {backend.readiness}"))
+    for label, value in rows:
+        table.add_row(label, Text(value))
+    console = Console()
+    console.print(table)
+    console.print("Tool discovery")
+    for tool, status in report.tools.items():
+        console.print(f"  {tool}  {status}")
+    console.print("Execution modes")
+    for mode, status in report.execution_modes.items():
+        console.print(f"  {mode}  {status}")
+    if report.recommendations:
+        console.print("Recommendations")
+        for recommendation in report.recommendations:
+            console.print(f"  - {recommendation}")
+
+
+@app.command(help="Check the local runtime and PyTorch device readiness.")
+def doctor(
+    json_output: Annotated[bool, typer.Option("--json", help="Print the versioned JSON report.")] = False,
+) -> None:
+    report = collect_environment(Path.cwd())
+    if json_output:
+        typer.echo(json.dumps(report.to_dict(), indent=2))
+    else:
+        _print_environment(report)
 
 
 @app.command(help="Configure the pipeline (planned).")
