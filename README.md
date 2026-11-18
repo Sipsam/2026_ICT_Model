@@ -201,6 +201,17 @@ ict inspect --batch requests.jsonl --run outputs/pilot/training/faster_rcnn --tr
 
 The command prints the new report directory. An empty real prediction produces `review_required`. The `pass` outcome requires a separate verification record. [Inspection contracts, batch recovery, and examples](docs/inspection-interface.md)
 
+## Serve inspections over HTTP
+
+Install the optional API extra and start the local FastAPI server.
+
+```text
+python -m pip install -e ".[api]"
+python -m ict_pipeline.api
+```
+
+The server defaults to `http://127.0.0.1:8000` with two explicitly simulated models and requires no detector weights for mock mode. Submit JPEG or PNG images singly or in batches and retrieve stored results by ID. Use the [REST API guide](docs/rest-api.md) for curl and Python examples, OpenAPI, trusted model configuration, and deployment limits.
+
 ## Inspect runs and export local reports
 
 ```text

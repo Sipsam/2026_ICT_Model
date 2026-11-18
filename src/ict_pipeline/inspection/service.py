@@ -17,10 +17,11 @@ from ..evaluation.adapters import PredictorFactory, load_predictor
 from ..evaluation.contracts import CLASSES, EvaluationConfig, EvaluationError, Prediction, Preprocessing
 from ..evaluation.metrics import box_iou
 from ..evaluation.runner import inspect_checkpoint
+from ..models.contracts import ModelName
 from ..models.dataset import Sample
 from ..pipeline.store import fingerprint_path
 from .contracts import (
-    CheckpointKind, Detection, Device, Failure, ImageSource, InspectionError, InspectionRequest,
+    CheckpointKind, Detection, Device, Failure, ImageSource, InspectionError, InspectionInput, InspectionRequest,
     InspectionResult, InspectionThresholds, MockScenario, ModelProvenance,
 )
 
@@ -72,12 +73,34 @@ def local_path(path: Path, base: Path, credentials: Credentials) -> Path:
     return resolved
 
 
-def _read_image(path: Path) -> tuple[ImageSource, bytes]:
+def _decode_image(
+    data: bytes, *, expected_format: Literal["JPEG", "PNG"] | None = None,
+    max_width: int = MAX_IMAGE_PIXELS, max_height: int = MAX_IMAGE_PIXELS,
+    max_pixels: int = MAX_IMAGE_PIXELS,
+) -> ImageSource:
     try:
         from PIL import Image
     except ImportError:
         raise InspectionError("Inspection requires Pillow from the existing preprocess or detector extra.") from None
 
+    try:
+        with Image.open(BytesIO(data), formats=("JPEG", "PNG")) as image:
+            width, height = image.size
+            if (not 0 < width <= max_width or not 0 < height <= max_height
+                    or width * height > min(MAX_IMAGE_PIXELS, max_pixels)
+                    or getattr(image, "is_animated", False)
+                    or (expected_format is not None and image.format != expected_format)):
+                raise ImageError("invalid_image")
+            image_format = cast(Literal["JPEG", "PNG"], image.format)
+            image.verify()
+        with Image.open(BytesIO(data), formats=("JPEG", "PNG")) as image:
+            image.load()
+        return ImageSource(width=width, height=height, format=image_format, sha256=hashlib.sha256(data).hexdigest())
+    except (OSError, ValueError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning):
+        raise ImageError("invalid_image") from None
+
+
+def _read_image(path: Path) -> tuple[ImageSource, bytes]:
     try:
         if not path.exists():
             raise ImageError("missing_image")
@@ -87,18 +110,10 @@ def _read_image(path: Path) -> tuple[ImageSource, bytes]:
             data = stream.read(MAX_IMAGE_BYTES + 1)
         if len(data) > MAX_IMAGE_BYTES:
             raise ImageError("invalid_image")
-        with Image.open(BytesIO(data), formats=("JPEG", "PNG")) as image:
-            width, height = image.size
-            if min(width, height) <= 0 or width * height > MAX_IMAGE_PIXELS or getattr(image, "is_animated", False):
-                raise ImageError("invalid_image")
-            image_format = cast(Literal["JPEG", "PNG"], image.format)
-            image.verify()
-        with Image.open(BytesIO(data), formats=("JPEG", "PNG")) as image:
-            image.load()
-        return ImageSource(width=width, height=height, format=image_format, sha256=hashlib.sha256(data).hexdigest()), data
+        return _decode_image(data), data
     except FileNotFoundError:
         raise ImageError("missing_image") from None
-    except (OSError, ValueError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning):
+    except (OSError, ValueError):
         raise ImageError("invalid_image") from None
 
 
@@ -156,6 +171,7 @@ class InspectionService:
         checkpoint_kind: CheckpointKind = "best", expected_fingerprint: str | None = None,
         device: Device = "cpu", image_size: int | None = None, credentials: Credentials | None = None,
         factory: PredictorFactory | None = None,
+        expected_model: ModelName | None = None, scratch_root: Path | None = None,
     ) -> "InspectionService":
         if trust_run is not True:
             raise InspectionError("Confirm the completed model directory comes from a trusted source.")
@@ -165,6 +181,8 @@ class InspectionService:
             metadata = run / "run.json"
             metadata_fingerprint = fingerprint_path(metadata)
             checkpoint = inspect_checkpoint(run, checkpoint_kind, credentials)
+            if expected_model is not None and checkpoint.name != expected_model:
+                raise InspectionError("Checkpoint model differs from the configured model.")
             if expected_fingerprint is not None and checkpoint.fingerprint != expected_fingerprint:
                 raise InspectionError("Checkpoint fingerprint differs from the supplied fingerprint.")
             config = EvaluationConfig(
@@ -172,7 +190,7 @@ class InspectionService:
                 score_floor=min(thresholds.confidence, 0.999), confidence=thresholds.confidence,
                 nms_iou=thresholds.nms_iou, warmup=0, device=device,
             )
-            with TemporaryDirectory(prefix="ict-inspect-model-") as directory:
+            with TemporaryDirectory(prefix="ict-inspect-model-", dir=scratch_root) as directory:
                 scratch = Path(directory)
                 snapshot = scratch / checkpoint.path.name
                 copyfile(checkpoint.path, snapshot)
@@ -193,7 +211,7 @@ class InspectionService:
             raise InspectionError("Cannot initialize inspection. Check run metadata, checkpoint, runtime and options.") from None
         return cls(predictor, provenance, thresholds, credentials)
 
-    def _context(self, request: InspectionRequest | None, input_line: int | None) -> dict[str, object]:
+    def _context(self, request: InspectionInput | None, input_line: int | None) -> dict[str, object]:
         context: dict[str, object] = {
             "provenance": self.provenance, "thresholds": self.thresholds, "input_line": input_line,
         }
@@ -202,8 +220,9 @@ class InspectionService:
                 request_id=self.credentials.redact_text(request.request_id),
                 source_id=self.credentials.redact_text(request.source_id),
                 sensor_source_id=self.credentials.redact_text(request.sensor.source_id) if request.sensor else None,
-                metadata=self.credentials.redact(request.metadata),
             )
+            if isinstance(request, InspectionRequest):
+                context["metadata"] = self.credentials.redact(request.metadata)
         return context
 
     def invalid_request(self, input_line: int) -> InspectionResult:
@@ -225,6 +244,28 @@ class InspectionService:
         except ImageError as exc:
             return InspectionResult(outcome="inference_failed", reason=exc.reason, **context)
 
+        return self._predict_image(request, image, data, context, reuse=reuse)
+
+    def inspect_bytes(
+        self, request: InspectionInput, data: bytes, *, image_format: Literal["JPEG", "PNG"],
+        max_width: int, max_height: int, max_pixels: int, scratch_root: Path,
+    ) -> InspectionResult:
+        """Inspect uploaded bytes without accepting a caller-supplied file path."""
+        context = self._context(request, None)
+        try:
+            if len(data) > MAX_IMAGE_BYTES:
+                raise ImageError("invalid_image")
+            image = _decode_image(data, expected_format=image_format, max_width=max_width,
+                                  max_height=max_height, max_pixels=max_pixels)
+        except ImageError as exc:
+            return InspectionResult(outcome="inference_failed", reason=exc.reason, **context)
+        return self._predict_image(request, image, data, context, scratch_root=scratch_root)
+
+    def _predict_image(
+        self, request: InspectionInput, image: ImageSource, data: bytes, context: dict[str, object],
+        *, reuse: Callable[[ImageSource], InspectionResult | None] | None = None,
+        scratch_root: Path | None = None,
+    ) -> InspectionResult:
         context["image"] = image
         if request.expected_size and (image.width, image.height) != (request.expected_size.width, request.expected_size.height):
             return InspectionResult(outcome="inference_failed", reason="dimension_mismatch", **context)
@@ -234,7 +275,7 @@ class InspectionService:
                     and all(getattr(cached, key) == value for key, value in context.items())):
                 return cached
         try:
-            with TemporaryDirectory(prefix="ict-inspect-image-") as directory:
+            with TemporaryDirectory(prefix="ict-inspect-image-", dir=scratch_root) as directory:
                 extension = "jpg" if image.format == "JPEG" else "png"
                 snapshot = Path(directory) / f"image.{extension}"
                 snapshot.write_bytes(data)

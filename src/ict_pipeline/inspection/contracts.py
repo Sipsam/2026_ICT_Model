@@ -66,13 +66,16 @@ class SensorInput(Contract):
         return self
 
 
-class InspectionRequest(Contract):
+class InspectionInput(Contract):
     schema_version: SchemaVersion = 1
     request_id: Identifier
     source_id: Identifier
-    image_path: Path
     expected_size: ImageSize | None = None
     sensor: SensorInput | None = None
+
+
+class InspectionRequest(InspectionInput):
+    image_path: Path
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
 
     @model_validator(mode="after")

@@ -19,6 +19,8 @@ dependencies = [
 [project.optional-dependencies]
 preprocess = ["Pillow>=10", "openpyxl>=3.1"]
 test = ["pytest>=8", "Pillow>=10", "openpyxl>=3.1"]
+api = ["fastapi>=0.139,<1", "starlette>=1,<2", "python-multipart>=0.0.27,<1", "uvicorn>=0.46,<1", "Pillow>=10"]
+test-api = ["httpx>=0.28,<1"]
 mlflow = ["mlflow>=2.17,<4"]
 train-yolo = ["torch>=2.6", "torchvision>=0.21", "ultralytics==8.3.228"]
 train-faster-rcnn = ["torch>=2.6", "torchvision>=0.21", "Pillow>=10"]
