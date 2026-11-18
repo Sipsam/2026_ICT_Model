@@ -6,6 +6,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+*.egg-info/
 
 # Environment
 .env
@@ -40,3 +41,7 @@ wandb/
 # OS
 .DS_Store
 Thumbs.db
+
+# External Programs
+tools/aihubshell
+PLANS.md

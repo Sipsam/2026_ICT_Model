@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ict-pipeline"
+version = "0.1.0"
+description = "CLI for the ICT manufacturing defect detection pipeline"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "rich>=13",
+    "typer>=0.16",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+ict = "ict_pipeline.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["ict_pipeline", "ict_pipeline.*"]
+namespaces = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
