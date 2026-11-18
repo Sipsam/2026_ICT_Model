@@ -1,13 +1,16 @@
 """Read and verify the allowlisted sensor measurements."""
 
 import math
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import BinaryIO, Literal, TypeVar
 
 from ..data.preprocessing.audit import XLSX_FIELDS
 from ..data.preprocessing.policy import SENSOR_FIELDS
 from .contracts import Reading
+
+_Reading = TypeVar("_Reading")
 
 
 class SampleIssue(ValueError):
@@ -54,10 +57,18 @@ def json_readings(raw: object, label: int) -> tuple[Reading, ...]:
 
 
 def xlsx_readings(path: Path, label: int | None) -> tuple[Reading, ...]:
+    return read_xlsx(path, reading, label)
+
+
+def read_xlsx(
+    source: Path | BinaryIO, parse: Callable[[object, tuple[object, ...]], _Reading],
+    label: int | None = None,
+) -> tuple[_Reading, ...]:
+    """Read the five allowlisted columns with a caller-selected reading contract."""
     from openpyxl import load_workbook
 
     try:
-        book = load_workbook(path, read_only=True, data_only=True)
+        book = load_workbook(source, read_only=True, data_only=True)
         try:
             rows = book.active.iter_rows(values_only=True)
             header = tuple(str(value).strip() for value in next(rows, ()))
@@ -74,7 +85,7 @@ def xlsx_readings(path: Path, label: int | None) -> tuple[Reading, ...]:
             for row in rows:
                 if labels and label is not None:
                     check_label(row[labels[0]], label)
-                series.append(reading(row[columns[0]], tuple(row[index] for index in columns[1:])))
+                series.append(parse(row[columns[0]], tuple(row[index] for index in columns[1:])))
         finally:
             book.close()
     except SampleIssue:

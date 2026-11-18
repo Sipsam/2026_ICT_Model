@@ -6,6 +6,7 @@ from pathlib import Path
 from shutil import copyfileobj
 from tempfile import TemporaryDirectory
 from time import monotonic
+from typing import TextIO
 
 from ..model import Progress
 from .common import require_separate_output
@@ -62,7 +63,7 @@ def report_output(
                     copyfileobj(source, destination)
 
 
-def console_progress(stage: str) -> Progress:
+def console_progress(stage: str, *, file: TextIO | None = None) -> Progress:
     started = monotonic()
     last = float("-inf")
 
@@ -72,7 +73,8 @@ def console_progress(stage: str) -> Progress:
         if done == total or now - last >= 1:
             elapsed = now - started
             eta = f"{elapsed * (total - done) / done:.1f}s" if done and total is not None else "unknown"
-            print(f"{stage} {done}/{total if total is not None else '?'}   elapsed {elapsed:.1f}s   ETA {eta}", flush=True)
+            print(f"{stage} {done}/{total if total is not None else '?'}   elapsed {elapsed:.1f}s   ETA {eta}",
+                  file=file, flush=True)
             last = now
 
     return report

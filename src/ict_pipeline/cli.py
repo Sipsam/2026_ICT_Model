@@ -27,6 +27,7 @@ from .evaluation.contracts import EvaluationConfig, EvaluationError, EvaluationS
 from .inspection.commands import inspect_command
 from .models.contracts import ModelName, TrainingError
 from .models.optimization.commands import training_data_app
+from .multimodal.commands import multimodal_app
 from .pipeline import PipelineError, StageRunner
 from .pipeline.detection import DETECTION_STAGES, DetectionStages
 from .pipeline.model import valid_id
@@ -53,6 +54,7 @@ app.add_typer(runtime_app, name="runtime")
 app.add_typer(pilot_app, name="pilot")
 app.add_typer(history_app, name="history")
 app.add_typer(training_data_app, name="training-data")
+app.add_typer(multimodal_app, name="multimodal")
 app.command("recommend")(recommend_command)
 app.command("inspect")(inspect_command)
 app.command()(status)

@@ -111,11 +111,16 @@ def is_candidate(row: CsvRow) -> bool:
 
 def source_rows(manifest: Path, root: Path, path_base: Path) -> list[CsvRow]:
     """Normalize either manifest dialect to paths relative to the extracted root."""
-    rows = read_csv(manifest)
+    return normalize_source_rows(read_csv(manifest), root, path_base)
+
+
+def normalize_source_rows(
+    rows: list[CsvRow], root: Path, path_base: Path, *, provider_column: str = "split",
+) -> list[CsvRow]:
     if not rows:
         raise ValueError("The source manifest is empty.")
     for row in rows:
-        if row.get("split") not in SPLIT_MAP or not safe_component(row.get("sample_id", "")):
+        if row.get(provider_column) not in SPLIT_MAP or not safe_component(row.get("sample_id", "")):
             raise ValueError("The source manifest contains an invalid original split or sample ID.")
         for key in MODALITIES:
             if row.get(key):
@@ -125,8 +130,8 @@ def source_rows(manifest: Path, root: Path, path_base: Path) -> list[CsvRow]:
                 row[key] = path.relative_to(root).as_posix()
             else:
                 row[key] = ""
-    rows.sort(key=lambda row: (row["split"], row["sample_id"], row["annotation_path"]))
-    keys = {(row["split"], row["sample_id"], row["annotation_path"]) for row in rows}
+    rows.sort(key=lambda row: (row[provider_column], row["sample_id"], row["annotation_path"]))
+    keys = {(row[provider_column], row["sample_id"], row["annotation_path"]) for row in rows}
     if len(keys) != len(rows):
         raise ValueError("The manifest contains repeated source records.")
     return rows

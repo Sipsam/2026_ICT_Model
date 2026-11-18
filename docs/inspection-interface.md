@@ -32,6 +32,11 @@ Provide one UTF-8 version 1 request per physical line, up to 32 MiB per manifest
 
 `sensor` and `metadata` are optional. Sensor values support the canonical SMT measurements `temperature`, `humidity`, `vibration`, `acceleration`, and `noise`. Image detectors receive only pixels. The result carries the sensor source ID and sanitized metadata for correlation. Sensor measurements stay with the request, and sensor alignment and quality require upstream validation.
 
+To use a verified offline sensor step as inspection context, send the observed
+source-unit values in the existing `sensor.values` dictionary and omit missing
+channels. Padded or scaled dataset values are reserved for downstream model
+inputs. [Multimodal sequence contracts](multimodal-data.md)
+
 ## Results
 
 The JSON document contains `schema_version: 1` and a `records` array. Each record includes request and source identifiers when available, outcome and reason, image dimensions and content SHA-256 when a validated image is available, provenance, thresholds, and detections. Real provenance includes the model, checkpoint selection and fingerprints, resolved device, resize setting, and backend package versions. Detection boxes are `[x_min, y_min, x_max, y_max]` in absolute original-image pixels and retain their model confidence. IDs follow the canonical mapping.

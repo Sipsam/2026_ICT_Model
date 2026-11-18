@@ -25,7 +25,10 @@ def link_or_copy(src: Path, dst: Path, mode: Literal["link", "copy"], fallback: 
 
 def check_source(json_path: Path, sample_id: str) -> tuple[int, int, list[tuple[int, list[float]]]]:
     with json_path.open(encoding="utf-8-sig") as f:
-        data = json.load(f)
+        return check_annotation(json.load(f), sample_id)
+
+
+def check_annotation(data: dict, sample_id: str) -> tuple[int, int, list[tuple[int, list[float]]]]:
     images = data.get("images")
     if not isinstance(images, list) or len(images) != 1:
         raise ValueError(f"{sample_id}: exactly one images[] record required")

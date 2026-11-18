@@ -93,7 +93,12 @@ Both formats preserve the original ISO timestamp. CSV accepts either bare canoni
 | `acceleration` | g |
 | `noise` | dB |
 
-These are replay interchange formats. For SMT exports, verify the image-to-sensor filename relationship, capture time, and available JSON/XLSX timestamp and value agreement first. Use a trusted per-item reference in both exports. SMT image and sensor numeric IDs may differ. Export the intended observation for each frame and omit the target `defect_detected` and any fields derived from it. The stream reuses the SMT timestamp parser and measurement contracts. Sensor-window feature aggregation remains part of the separate classification workflow.
+These are replay interchange formats. For SMT exports, verify the image-to-sensor filename relationship, capture time, and available JSON/XLSX timestamp and value agreement first. Use a trusted per-item reference in both exports. SMT image and sensor numeric IDs may differ. Export the intended observation for each frame and omit the target `defect_detected` and any fields derived from it. The stream reuses the SMT timestamp parser and measurement contracts.
+
+The offline multimodal audit verifies AI Hub records before exposing canonical
+sequences. A chosen raw step can populate `SensorObservation.values` using the
+same five channel names, units, and nullable values. A decision-window tensor
+uses separately frozen Train preprocessing. [Offline sequence and dataset contracts](multimodal-data.md)
 
 ## Alignment and missing input
 

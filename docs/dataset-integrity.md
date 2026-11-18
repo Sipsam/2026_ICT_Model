@@ -53,6 +53,11 @@ Changing a sealed image, label file, split revision, or label policy invalidates
 
 `ict training-data imbalance` joins the published manifest to the converted annotation counts and reports support by split, manufacturer and group. Train-only balancing leaves split assignments intact. Keep Test closed during ablation planning and tuning. [Class counts and Train cohort selection](training-optimization.md)
 
+`ict multimodal audit` accepts the provider manifest or a published
+`manifest.csv` and `split.json`. It binds verified sensor windows to that
+assignment and records group quarantines before fitting sensor preprocessing.
+[Multimodal coverage and dataset API](multimodal-data.md)
+
 ## Verification
 
 Run the fixture and optional local regression tests with the existing environment:

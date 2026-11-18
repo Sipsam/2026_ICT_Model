@@ -286,6 +286,14 @@ The four commands under `scripts/` retain their standalone arguments and default
 
 Use `ict integrity analyze` to measure overlap in the original AI Hub assignments and `ict integrity split --dry-run` to preview a group-aware revision. Published split bundles are opt-in through `ict run --split-bundle` or the standalone commands' `--dataset` option. The [dataset integrity and evaluation protocol](docs/dataset-integrity.md) describes the evidence, publication options, and Test roles.
 
+## Audit and prepare multimodal data
+
+```text
+ict multimodal audit --root data/extracted --manifest data/processed/manifest.csv --path-base . --preview
+```
+
+The audit reports verified JPG/JSON/XLSX relationships, split and source coverage, missing measurements, and channel statistics without fitting a model. Use `--out <fresh-directory> --export-index` to prepare a portable cohort for image, sensor, and paired dataset views. Sensor preprocessing uses frozen Train statistics and a capture-time window by default. [Source schema, measured coverage, and Python examples](docs/multimodal-data.md)
+
 ## Sensor and image-level classification
 
 Use the preprocessing dependencies for JPG and XLSX decoding. The classification models run on CPU with no pretrained weights. Put this configuration in a file such as `classification.yaml` and point `data_path` at the extracted dataset.
