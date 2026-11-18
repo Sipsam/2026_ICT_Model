@@ -32,7 +32,26 @@ The CLI runs without PyTorch, GPU libraries, or dataset files.
 
 `ict --help` lists the registered commands, and `ict --version` prints the installed package version. Both exit with status `0`.
 
-`run`, `status`, `resume`, `data`, `train`, `evaluate`, `compare`, `report`, and `clean` are placeholders. Invoking one prints a message to stderr and exits with status `1`. Workflow options and subcommands are planned in [PLANS.md](PLANS.md). Existing dataset tools can still be invoked directly from `scripts/` with their own dependencies.
+`data`, `train`, `evaluate`, `compare`, `report`, and `clean` are placeholders and exit with status `1`. Existing dataset tools can be invoked directly from `scripts/` with their own dependencies. The rollout is described in [PLANS.md](PLANS.md).
+
+## Plan, inspect, and resume a pipeline run
+
+```text
+ict run --dry-run
+ict run --dry-run --until validate_detection
+ict status
+ict resume --run-id <id>
+```
+
+The production DAG declares ten stages from download through report. Their adapters are scheduled for later phases, so a preview lists them as unavailable and an execution stops at the first stage that needs an adapter. The test suite executes a small DAG with synthetic files.
+
+With executable stages registered, `ict run` selects the entire DAG and creates a run ID. Pass `--run-id <id>` to choose a name or reuse that run's cache. `--from` and `--until` select an inclusive range in dependency order. Repeat `--only` to select individual stages. Any omitted prerequisite must have a valid result in the same run. `--force` recomputes the selection in new artifact directories.
+
+`ict status` shows the latest recorded attempt per stage. `ict resume` replays the saved selection and rechecks settings, inputs, stage versions, and artifact bytes before reuse. Both commands default to the run with the most recently updated state file. If you ran with `--config`, pass the same file to `resume` to use that profile again.
+
+Each run stores an atomic snapshot in `runs/<id>/state.json` and a structured event log in `events.jsonl`. A stage writes to `work/<stage>/<attempt>/`. After output verification, the runner publishes the directory under `artifacts/<stage>/<attempt>/` and commits the successful attempt to state. Failed and abandoned attempts remain available for inspection. Only an attempt recorded as completed and verified against its fingerprints is eligible for cache reuse. A lock allows one writer per run, and the OS releases it when the process exits. Cancellation returns status `130`. Progress includes elapsed time and an ETA when the stage reports measurable work.
+
+The Python adapter interface is `Stage`, `StageInput`, `StageContext`, and `StageResult` in `ict_pipeline.pipeline`. An adapter should read the declared inputs, write artifacts exclusively to `StageContext.output_dir`, and report progress as completed and total units. `StageContext.artifact_dir` is the future published path for files that must refer to it. Adapters own data-format validation and must keep secrets out of outputs and console messages. Bump `Stage.version` when changes to an adapter affect the validity of its results.
 
 ## Environment diagnostics
 

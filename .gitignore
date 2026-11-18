@@ -23,6 +23,7 @@ data/extracted/
 
 # Model artifacts
 outputs/
+/runs/
 *.pt
 *.pth
 *.ckpt

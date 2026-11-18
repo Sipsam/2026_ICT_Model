@@ -5,14 +5,20 @@ import os
 from importlib.metadata import version
 from pathlib import Path
 from typing import Annotated, NoReturn
+from uuid import uuid4
 
 import typer
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from .config.settings import SetupError, merge_settings, validate_settings
 from .environment.doctor import collect_environment
 from .environment.model import EnvironmentReport
+from .pipeline import PipelineError, StageRunner
+from .pipeline.model import valid_id
+from .pipeline.runner import StageEvent
+from .pipeline.stages import pipeline_stages
 
 app = typer.Typer(
     name="ict",
@@ -136,7 +142,6 @@ def setup(
     training_profile: Annotated[str | None, typer.Option(help="smoke, standard, or full.")] = None,
     tracking: Annotated[str | None, typer.Option(help="off, local, or mlflow.")] = None,
 ) -> None:
-    from .config.settings import SetupError
     from .wizard import run_setup
 
     overrides = {
@@ -163,19 +168,108 @@ def setup(
         raise typer.Exit(code=130) from None
 
 
-@app.command(help="Run pipeline stages (planned).")
-def run() -> None:
-    _not_implemented("run")
+def _pipeline_progress(event: StageEvent) -> None:
+    units = ""
+    if event.completed is not None:
+        total = event.total if event.total is not None else "?"
+        units = f"   {event.completed}/{total} units"
+    eta = f"{event.eta_seconds:.1f}s" if event.eta_seconds is not None else "unknown"
+    typer.echo(
+        f"[{event.stages_completed}/{event.stages_total}] {event.stage} {event.status}{units}"
+        f"   elapsed {event.elapsed_seconds:.1f}s   ETA {eta}"
+    )
 
 
-@app.command(help="Show pipeline run status (planned).")
-def status() -> None:
-    _not_implemented("status")
+def _pipeline(config: Path | None, run_id: str | None) -> StageRunner:
+    from .config.storage import SetupFiles
+
+    root = Path.cwd()
+    files = SetupFiles.read(root, config)
+    credentials = files.credentials(os.environ)
+    credentials.protect_path(run_id, "run ID")
+    values = merge_settings(files.config_text, os.environ, {})
+    values.setdefault("dataset_source", "skip")
+    settings = validate_settings(values, credentials).model_dump(exclude_none=True)
+    for key in ("data_path", "output_path"):
+        if key in settings:
+            try:
+                settings[key] = (root / settings[key]).resolve().as_posix()
+            except (OSError, RuntimeError, ValueError):
+                raise SetupError(f"Cannot resolve {key}. Check the path and permissions.") from None
+    return StageRunner(pipeline_stages(), root, settings, on_event=_pipeline_progress)
 
 
-@app.command(help="Resume an interrupted run (planned).")
-def resume() -> None:
-    _not_implemented("resume")
+def _pipeline_failure(exc: Exception) -> NoReturn:
+    if isinstance(exc, (OSError, ValueError)):
+        typer.echo("Cannot access run or configuration files. Check permissions and available storage.", err=True)
+    else:
+        typer.echo(str(exc), err=True)
+    raise typer.Exit(code=1) from None
+
+
+RunIdOption = Annotated[str | None, typer.Option(help="Identify a saved run under runs/.")]
+ConfigOption = Annotated[Path | None, typer.Option(help="Read settings from this YAML file.")]
+
+
+@app.command(help="Plan or execute selected pipeline stages.")
+def run(
+    dry_run: Annotated[bool, typer.Option(help="Print the plan without writing run files.")] = False,
+    start: Annotated[str | None, typer.Option("--from", help="First stage in the range.")] = None,
+    until: Annotated[str | None, typer.Option(help="Last stage in the range, inclusive.")] = None,
+    only: Annotated[list[str] | None, typer.Option(help="Select a stage. Repeat to select multiple stages.")] = None,
+    force: Annotated[bool, typer.Option(help="Recompute the selected stages in new artifact directories.")] = False,
+    run_id: RunIdOption = None,
+    config: ConfigOption = None,
+) -> None:
+    try:
+        runner = _pipeline(config, run_id)
+        selection = runner.graph.select(start, until, only or ())
+        if dry_run:
+            for step in runner.plan(selection, run_id=run_id, force=force):
+                typer.echo(f"{step.stage}   {step.action}")
+            return
+        run_id = uuid4().hex if run_id is None else run_id
+        if valid_id(run_id):
+            typer.echo(f"Run ID   {run_id}")
+        runner.run(run_id, selection, force=force)
+        typer.echo(f"Run {run_id} completed.")
+    except (PipelineError, SetupError, OSError, ValueError) as exc:
+        _pipeline_failure(exc)
+    except KeyboardInterrupt:
+        typer.echo("Run cancelled. Use ict status and ict resume to continue.", err=True)
+        raise typer.Exit(code=130) from None
+
+
+@app.command(help="Show the last recorded attempt for each stage in a run.")
+def status(run_id: RunIdOption = None) -> None:
+    try:
+        state = StageRunner(pipeline_stages(), Path.cwd(), {}).status(run_id)
+    except (PipelineError, OSError, ValueError) as exc:
+        _pipeline_failure(exc)
+    typer.echo(f"Run {state.run_id}   {state.status}   updated {state.updated_at}")
+    typer.echo("Selection   " + ", ".join(state.selection))
+    if state.pending_force:
+        typer.echo("Pending forced stages   " + ", ".join(state.pending_force))
+    for name in dict.fromkeys((*state.selection, *state.stages)):
+        record = state.stages.get(name)
+        if record is None:
+            typer.echo(f"{name}   pending")
+            continue
+        elapsed = f"   {record.elapsed_seconds:.1f}s" if record.elapsed_seconds is not None else ""
+        detail = f"   {record.error}" if record.error else ""
+        typer.echo(f"{name}   {record.status}{elapsed}{detail}")
+
+
+@app.command(help="Resume the last selection for a saved run and verify its cached results.")
+def resume(run_id: RunIdOption = None, config: ConfigOption = None) -> None:
+    try:
+        state = _pipeline(config, run_id).resume(run_id)
+        typer.echo(f"Run {state.run_id} completed.")
+    except (PipelineError, SetupError, OSError, ValueError) as exc:
+        _pipeline_failure(exc)
+    except KeyboardInterrupt:
+        typer.echo("Run cancelled. Use ict status and ict resume to continue.", err=True)
+        raise typer.Exit(code=130) from None
 
 
 @app.command(help="Manage pipeline datasets (planned).")
