@@ -96,19 +96,26 @@ def test_device_failure_and_approval_before_execution(
     assert not list(workspace.iterdir())
 
 
+@pytest.mark.parametrize("pretrained", [False, True])
 def test_training_reuses_config_and_explicit_device(
-    target: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    target: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pretrained: bool,
 ) -> None:
+    from test_pretrained import pretrained_profile
+
     workspace, dataset = target
     (dataset / "yolo").mkdir()
     configs = tmp_path / "configs"
     configs.mkdir()
     (configs / "yolo.yaml").write_text("epochs: 1\ndevice: cpu\n", encoding="utf-8")
+    if pretrained:
+        cached = configs / "cached.pt"
+        cached.write_bytes(b"runtime fixture")
+        pretrained_profile(configs, ModelName.YOLO, cached)
     monkeypatch.setattr(jobs, "collect_environment", lambda _path: SimpleNamespace(
         torch=Torch("available", version="2.6", cuda=Backend("available", "available")),
         graphics=SimpleNamespace(nvidia_driver="535.10", devices=()),
     ))
-    monkeypatch.setattr(ModelBackend, "versions", lambda _self: {})
+    monkeypatch.setattr(ModelBackend, "versions", lambda _self: {"ultralytics": "fixture"})
     plans = []
 
     def train(plan: training.TrainingPlan, progress: Progress) -> list[tuple[ModelName, None]]:
@@ -120,11 +127,14 @@ def test_training_reuses_config_and_explicit_device(
     task = JobRequest(workflow="train", dataset=str(dataset), device="cuda", model="yolo",
                       config_dir=str(configs), approve_train=True)
     request = WorkerRequest(action="run", workspace=str(workspace), job="train", task=task)
+    scope = LocalExecutor().execute(request.model_copy(update={"action": "preflight"}))
+    assert scope["ready"] and scope["training"]["initialization"] == ("pretrained" if pretrained else "scratch")
     result = LocalExecutor().execute(request)
     assert result["status"] == "completed"
     assert len(plans) == 1
     assert plans[0].models[ModelName.YOLO].device == "cuda"
     assert plans[0].models[ModelName.YOLO].epochs == 1
+    assert plans[0].weight_sources == ({ModelName.YOLO: cached} if pretrained else {})
 
 
 def test_evaluation_preflight_rejects_missing_best_checkpoint(

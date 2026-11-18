@@ -461,6 +461,7 @@ def train(
 ) -> None:
     from .models.registry import REGISTRY
     from .models.training import execute_training, plan_training
+    from .models.weights import training_scope
 
     if (model is not None) == all_models:
         raise typer.BadParameter("Select exactly one of --model or --all.")
@@ -481,6 +482,7 @@ def train(
         for name, config in plan.models.items():
             typer.echo(f"{name}   input {plan.dataset / REGISTRY[name].data_format}   output {plan.destination / name}")
             typer.echo(config.model_dump_json())
+            typer.echo(plan.credentials.redact_text(json.dumps(training_scope(name, config, plan.weight_sources.get(name)))))
         if dry_run:
             return
         if not approve_train:

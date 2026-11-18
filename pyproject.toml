@@ -23,6 +23,7 @@ mlflow = ["mlflow>=2.17,<4"]
 train-yolo = ["torch>=2.6", "torchvision>=0.21", "ultralytics==8.3.228"]
 train-faster-rcnn = ["torch>=2.6", "torchvision>=0.21", "Pillow>=10"]
 train-rt-detr = ["torch>=2.6", "torchvision>=0.21", "Pillow>=10", "transformers==4.57.6", "scipy>=1.10"]
+pretrained-safetensors = ["safetensors>=0.4.3"]
 
 [project.scripts]
 ict = "ict_pipeline.cli:app"

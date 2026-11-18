@@ -346,7 +346,12 @@ def staged_detectors(monkeypatch: pytest.MonkeyPatch) -> tuple[Counter[ModelName
     @dataclass
     class Adapter:
         name: ModelName
-        architecture = "fixture"
+
+        @property
+        def architecture(self) -> str:
+            from ict_pipeline.models.weights import LAYOUTS
+
+            return LAYOUTS[self.name].architecture
 
         def train(self, request: TrainingRequest) -> Checkpoints:
             calls[self.name] += 1
@@ -356,6 +361,8 @@ def staged_detectors(monkeypatch: pytest.MonkeyPatch) -> tuple[Counter[ModelName
             start = 1
             if request.resume:
                 start = int(request.resume.last.read_text()) + 1
+            elif request.pretrained:
+                request.record_transfer({"missing_keys": [], "unexpected_keys": [], "reset_keys": ["fixture-head"]})
             for epoch in range(start, request.config.epochs + 1):
                 for path in (paths.best, paths.last):
                     path.write_text(str(epoch))
@@ -366,12 +373,45 @@ def staged_detectors(monkeypatch: pytest.MonkeyPatch) -> tuple[Counter[ModelName
             return paths
 
     monkeypatch.setattr(training, "import_module", lambda _: fake_torch())
-    monkeypatch.setattr(Backend, "versions", lambda _: {"torch": "fixture"})
+    monkeypatch.setattr(Backend, "versions", lambda backend: {key: "fixture" for key in backend.libraries})
     monkeypatch.setattr(Backend, "load", lambda backend: Adapter(next(
         name for name, entry in REGISTRY.items() if entry == backend
     )))
     monkeypatch.setattr(evaluation, "load_predictor", lambda *_: FixturePredictor())
     return calls, interrupt
+
+
+def test_detection_dag_pretrained_cache_binding(
+    journey: Fixture, staged_detectors: tuple[Counter[ModelName], set[ModelName]],
+) -> None:
+    from test_pretrained import pretrained_profile
+
+    calls, interrupt = staged_detectors
+    name = ModelName.FASTER_RCNN
+    command("setup", "--non-interactive", "--dataset-source", "skip", "--data-path", str(journey.source))
+    configs = config_directory(journey.root, epochs=2)
+    checkpoint = configs / "cached.pt"
+    checkpoint.write_bytes(b"local fixture")
+    pretrained_profile(configs, name, checkpoint)
+    run = ("run", "--run-id", "pinned", "--model", name, "--config-dir", str(configs))
+    resume = ("resume", "--run-id", "pinned")
+    approve = "--approve-detection-train"
+    command(*run, "--dry-run", contains='"initialization": "pretrained"')
+    interrupt.add(name)
+    command(*run, approve, code=130, contains="Run cancelled")
+    command(*resume, approve, contains="Detection report")
+    metadata = json.loads((journey.artifact("pinned", "train") / "checkpoints" / name / "run.json").read_text())
+    assert metadata["initialization_mode"] == "pretrained" and metadata["initialization"] == "resume"
+    assert metadata["weight_transfer"]["reset_keys"] == ["fixture-head"]
+    completed = journey.state("pinned")
+    command(*resume, contains="train reused")
+    assert completed.stages == journey.state("pinned").stages
+    checkpoint.write_bytes(b"corrupt fixture")
+    command(*resume, approve, code=1, contains="SHA-256 mismatch")
+    assert calls == {name: 2}
+    pretrained_profile(configs, name, checkpoint)
+    command(*resume, approve, contains="Detection report")
+    assert calls == {name: 3}
 
 
 def test_detection_dag_all_models_resume_and_invalidate(

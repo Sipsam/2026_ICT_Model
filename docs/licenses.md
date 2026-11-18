@@ -13,3 +13,5 @@ Optional detector backends have their own licenses. Check the terms for the vers
 | Transformers RT-DETR dependency | [Apache-2.0](https://github.com/huggingface/transformers/blob/v4.57.6/LICENSE) |
 
 For other installed dependencies, retain the applicable license files and notices from their distributions.
+
+For pretrained checkpoint terms and provenance fields, see the [detector model guide](models.md#licensing).

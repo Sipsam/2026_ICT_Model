@@ -97,7 +97,9 @@ def pipeline_stages(
               ("detection_split_bundle",) if split_bundle is not None else (),
               execute=preprocessing.validate_revision if split_bundle is not None else preprocessing.validate,
               stage_version=f"{preprocessing_version}:receipt-{'split-v1' if split_bundle is not None else 'v1'}"),
-        stage("train", (detection, manifest, manifest_summary, validation), ("checkpoints",),
+        stage("train", (detection, manifest, manifest_summary, validation, *(
+            StageInput(f"pretrained_{name}", path) for name, path in detectors.weight_sources.items()
+        )), ("checkpoints",),
               ("detection_training",), detectors.train, training_version),
         stage("validate_models", (detection, checkpoints), ("predictions",),
               ("detection_evaluation",), detectors.validate_models, evaluation_version),

@@ -108,14 +108,18 @@ def preflight(store: RunStore, task: JobRequest) -> dict[str, object]:
         )
     elif task.model:
         try:
-            REGISTRY[task.model].versions()
             from ..models.training import plan_training
+            from ..models.weights import training_scope, verify_weights
 
-            plan_training(
+            plan = plan_training(
                 store.directory, (task.model,), dataset, store.directory / "runs" / "training",
                 absolute_path(task.config_dir) if task.config_dir else None,
                 absolute_path(task.model_run) if task.model_run else None, device=task.device,
             )
+            profile = plan.models[task.model]
+            source = plan.weight_sources.get(task.model)
+            report["training"] = store.credentials.redact(training_scope(task.model, profile, source))
+            verify_weights(task.model, profile, source, REGISTRY[task.model].versions())
         except TrainingError as exc:
             report.update(ready=False, reason=store.credentials.redact_text(str(exc)))
     elif task.model_run is not None:

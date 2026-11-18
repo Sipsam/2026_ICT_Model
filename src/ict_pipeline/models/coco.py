@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from ..data.preprocessing.policy import NAMES
 from .contracts import Checkpoints, TrainConfig, TrainingError, TrainingRequest
 from .dataset import Sample
+from .weights import LAYOUTS, load_weights, transfer_state
 
 if TYPE_CHECKING:
     import torch
@@ -58,6 +59,12 @@ class CocoAdapter:
     def validation_mode(self, model: Any) -> None:
         model.eval()
 
+    def backbone(self, model: Any) -> Any:
+        raise NotImplementedError
+
+    def initialize(self, model: Any, request: TrainingRequest) -> None:
+        raise NotImplementedError
+
     def train(self, request: TrainingRequest) -> Checkpoints:
         import numpy as np
         import torch
@@ -65,9 +72,27 @@ class CocoAdapter:
 
         cfg = request.config
         torch.manual_seed(cfg.seed)
-        model = self.build_model(cfg).to(request.device)
-        make_optimizer: Callable[..., Any] = getattr(torch.optim, cfg.optimizer)
-        optimizer = make_optimizer(model.parameters(), lr=cfg.lr)
+        model = self.build_model(cfg)
+        if cfg.initialization == "pretrained" and request.resume is None:
+            self.initialize(model, request)
+        frozen_backbone = self.backbone(model) if cfg.freeze_backbone else None
+        if frozen_backbone is not None:
+            frozen_backbone.requires_grad_(False)
+        model.to(request.device)
+        make_optimizer: Callable[..., Any] = getattr(torch.optim, cfg.optimizer_name)
+        fine_tuning = cfg.fine_tuning
+        options = {}
+        if fine_tuning and fine_tuning.weight_decay is not None:
+            options["weight_decay"] = fine_tuning.weight_decay
+        if fine_tuning and fine_tuning.momentum is not None:
+            if cfg.optimizer_name == "SGD":
+                options["momentum"] = fine_tuning.momentum
+            else:
+                options["betas"] = (fine_tuning.momentum, 0.999)
+        parameters = model.parameters()
+        if frozen_backbone is not None:
+            parameters = (parameter for parameter in parameters if parameter.requires_grad)
+        optimizer = make_optimizer(parameters, lr=cfg.learning_rate, **options)
         dtype = torch.bfloat16 if cfg.precision == "bf16" else torch.float16
         mixed = cfg.precision != "fp32"
         scaler = torch.amp.GradScaler("cuda", enabled=cfg.precision == "fp16")
@@ -106,6 +131,8 @@ class CocoAdapter:
             np.random.seed(seed)
             generator.manual_seed(seed)
             model.train()
+            if frozen_backbone is not None:
+                frozen_backbone.eval()
             request.progress(f"epoch {epoch}/{cfg.epochs} train batch", 0, len(train))
             for step, batch in enumerate(train, 1):
                 optimizer.zero_grad(set_to_none=True)
@@ -152,15 +179,43 @@ class CocoAdapter:
 
 
 class FasterRCNNAdapter(CocoAdapter):
-    architecture = "fasterrcnn_mobilenet_v3_large_320_fpn"
+    architecture = LAYOUTS["faster_rcnn"].architecture
 
     def build_model(self, config: TrainConfig) -> Any:
         from torchvision.models.detection import fasterrcnn_mobilenet_v3_large_320_fpn
 
+        if config.initialization == "pretrained":
+            from torchvision.models.detection import FasterRCNN
+            from torchvision.models.detection.anchor_utils import AnchorGenerator
+            from torchvision.models.detection.backbone_utils import mobilenet_backbone
+
+            backbone = mobilenet_backbone(
+                backbone_name="mobilenet_v3_large", weights=None, fpn=True, trainable_layers=6,
+            )
+            anchors = AnchorGenerator(((32, 64, 128, 256, 512),) * 3, ((0.5, 1.0, 2.0),) * 3)
+            return FasterRCNN(
+                backbone, num_classes=len(NAMES) + 1, rpn_anchor_generator=anchors,
+                min_size=config.image_size, max_size=config.image_size,
+                rpn_pre_nms_top_n_test=150, rpn_post_nms_top_n_test=150, rpn_score_thresh=0.05,
+            )
         return fasterrcnn_mobilenet_v3_large_320_fpn(
             weights=None, weights_backbone=None, num_classes=len(NAMES) + 1,
             min_size=config.image_size, max_size=config.image_size,
         )
+
+    def backbone(self, model: Any) -> Any:
+        return model.backbone.body
+
+    def initialize(self, model: Any, request: TrainingRequest) -> None:
+        state = load_weights(request)
+        assert request.pretrained is not None
+        classes = request.pretrained.source_classes
+        shapes = {key: tuple(value.shape) for key, value in model.state_dict().items()}
+        reset = {key for key in shapes if key.startswith("roi_heads.box_predictor.")}
+        for key in reset:
+            rows = classes * 4 if ".bbox_pred." in key else classes
+            shapes[key] = (rows, *shapes[key][1:])
+        transfer_state(model, state, shapes, reset, request)
 
     def batch_loss(self, model: Any, batch: Batch, request: TrainingRequest) -> torch.Tensor:
         import torch
@@ -192,7 +247,7 @@ class FasterRCNNAdapter(CocoAdapter):
 
 
 class RTDETRAdapter(CocoAdapter):
-    architecture = "rt-detr-resnet18"
+    architecture = LAYOUTS["rt_detr"].architecture
 
     def build_model(self, config: TrainConfig) -> Any:
         from transformers import RTDetrConfig, RTDetrForObjectDetection, RTDetrResNetConfig
@@ -206,9 +261,31 @@ class RTDETRAdapter(CocoAdapter):
         return RTDetrForObjectDetection(RTDetrConfig(
             backbone_config=backbone, use_pretrained_backbone=False, disable_custom_kernels=True,
             encoder_in_channels=[128, 256, 512], decoder_layers=3,
+            hidden_expansion=0.5 if config.initialization == "pretrained" else 1.0,
             num_queries=min(300, sum((size // stride) ** 2 for stride in (8, 16, 32))),
             id2label=names, label2id={name: index for index, name in names.items()},
         ))
+
+    def backbone(self, model: Any) -> Any:
+        return model.model.backbone
+
+    def initialize(self, model: Any, request: TrainingRequest) -> None:
+        state = load_weights(request)
+        assert request.pretrained is not None
+        classes = request.pretrained.source_classes
+        shapes = {key: tuple(value.shape) for key, value in model.state_dict().items()}
+        reset = {
+            key for key in shapes if key.startswith((
+                "class_embed.", "model.decoder.class_embed.", "model.enc_score_head.", "model.denoising_class_embed.",
+            ))
+        }
+        aliases = {
+            key: "model.decoder." + key for key in shapes if key.startswith(("bbox_embed.", "class_embed."))
+        }
+        for key in reset:
+            rows = classes + int(key == "model.denoising_class_embed.weight")
+            shapes[key] = (rows, *shapes[key][1:])
+        transfer_state(model, state, shapes, reset, request, aliases=aliases)
 
     def batch_loss(self, model: Any, batch: Batch, request: TrainingRequest) -> torch.Tensor:
         import torch

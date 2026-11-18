@@ -3,8 +3,8 @@
 import json
 import math
 import platform
-from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import asdict, dataclass, field
 from functools import wraps
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -24,6 +24,7 @@ from ..models.contracts import ModelName, Progress, TrainConfig, TrainingError
 from ..models.dataset import Split, inspect_data
 from ..models.registry import REGISTRY
 from ..models.training import TrainingPlan, checkpoint_paths, execute_training, read_training_profile
+from ..models.weights import checkpoint_source, training_scope, verify_weights, weight_packages
 from ..reporting.export import ReportFormat, report_document, write_report_file
 from .model import StageContext, StageFailure, StageResult
 from .store import RunStore, digest_json, fingerprint_path, timestamp
@@ -70,6 +71,7 @@ class DetectionStages:
     config: EvaluationConfig
     approved: bool = False
     show_scope: Callable[[str], None] | None = None
+    weight_sources: Mapping[ModelName, Path] = field(default_factory=dict)
 
     @classmethod
     def configure(
@@ -77,14 +79,19 @@ class DetectionStages:
         config: EvaluationConfig, approved: bool, show_scope: Callable[[str], None],
     ) -> "DetectionStages":
         profiles = {name: read_training_profile(name, config_dir) for name in names}
-        return cls(workspace, credentials, profiles, config, approved, show_scope)
+        weights = {
+            name: path for name, (profile, _) in profiles.items()
+            if (path := checkpoint_source(name, profile, config_dir, credentials)) is not None
+        }
+        return cls(workspace, credentials, profiles, config, approved, show_scope, weights)
 
     def describe_training(self, dataset: str, output: Path) -> None:
         if self.show_scope:
             for name, (config, fingerprint) in self.profiles.items():
                 self.show_scope(self.credentials.redact_text(
                     f"Detector {name}   input {dataset}   output {output}   YAML SHA-256 {fingerprint}\n"
-                    f"{config.model_dump_json()}"
+                    f"{config.model_dump_json()}\n"
+                    f"{json.dumps(training_scope(name, config, self.weight_sources.get(name)))}"
                 ))
 
     def model_revision(self, name: ModelName) -> str:
@@ -92,7 +99,7 @@ class DetectionStages:
         return digest_json({
             "config": config.model_dump(mode="json"), "profile": fingerprint,
             "runtime": [platform.python_version(), platform.system(), platform.machine()],
-            "packages": _package_versions(REGISTRY[name].libraries),
+            "packages": _package_versions(REGISTRY[name].libraries + weight_packages(config)),
             "code": {
                 path.name: fingerprint_path(path)
                 for path in sorted((Path(__file__).parents[1] / "models").glob("*.py"))
@@ -132,7 +139,11 @@ class DetectionStages:
         target.mkdir()
         self.describe_training(str(dataset), context.artifact_dir / "checkpoints")
         for index, (name, (config, profile_hash)) in enumerate(self.profiles.items(), 1):
-            identity = digest_json([revision, name, self.model_revision(name)])
+            weight_input = f"pretrained_{name}"
+            weight_path = context.inputs.get(weight_input)
+            if config.checkpoint is not None:
+                verify_weights(name, config, weight_path, REGISTRY[name].versions())
+            identity = digest_json([revision, name, self.model_revision(name), context.input_fingerprints.get(weight_input)])
             root = RunStore(context.recovery_dir, identity, self.credentials).directory
             model, resume = self._recover(root, name, config, profile_hash, revision)
             if model is None:
@@ -144,7 +155,7 @@ class DetectionStages:
                     )
                 plan = TrainingPlan(
                     {name: config}, dataset, root / uuid4().hex, resume, self.credentials, self.workspace,
-                    revision, profile_hash, data,
+                    revision, profile_hash, data, {name: weight_path} if weight_path else {},
                 )
                 list(execute_training(plan, progress))
                 model = plan.destination / name
