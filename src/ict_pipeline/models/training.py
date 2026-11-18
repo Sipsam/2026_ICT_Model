@@ -13,6 +13,7 @@ from importlib.resources import files
 from pathlib import Path
 from shutil import copyfile
 from time import monotonic
+from typing import Literal
 from uuid import uuid4
 
 import yaml
@@ -41,11 +42,14 @@ class TrainingPlan:
     workspace: Path
 
 
-def _config(name: ModelName, directory: Path | None) -> TrainConfig:
+def _config(name: ModelName, directory: Path | None, device: str | None) -> TrainConfig:
     try:
         source = files(__package__) if directory is None else directory
         contents = source.joinpath(f"{name}.yaml").read_text(encoding="utf-8-sig")
-        return TrainConfig.model_validate(yaml.safe_load(contents))
+        values = yaml.safe_load(contents)
+        if device is not None and isinstance(values, dict):
+            values["device"] = device
+        return TrainConfig.model_validate(values)
     except ValidationError as exc:
         fields = [
             str(error["loc"][0]) if error["loc"] and error["loc"][0] in TrainConfig.model_fields
@@ -59,7 +63,8 @@ def _config(name: ModelName, directory: Path | None) -> TrainConfig:
 
 def plan_training(
     workspace: Path, names: tuple[ModelName, ...], dataset: Path, runs: Path,
-    config_dir: Path | None, resume_from: Path | None,
+    config_dir: Path | None, resume_from: Path | None, *,
+    device: Literal["cpu", "cuda", "rocm", "mps"] | None = None,
 ) -> TrainingPlan:
     credentials = SetupFiles.read(workspace, None).credentials(os.environ)
 
@@ -83,7 +88,7 @@ def plan_training(
         if resume_from.name != names[0] or not (resume_from / "run.json").is_file():
             raise TrainingError("Select the model directory of an earlier ICT training run.")
         require_separate_output(resume_from, destination)
-    models = {name: _config(name, directory) for name in names}
+    models = {name: _config(name, directory, device) for name in names}
     for name in names:
         source = dataset / REGISTRY[name].data_format
         if not source.is_dir() or not source.resolve().is_relative_to(dataset):

@@ -34,6 +34,8 @@ The CLI runs without PyTorch, GPU libraries, or dataset files.
 
 `clean` is a placeholder and exits with status `1`. The rollout is described in [PLANS.md](PLANS.md).
 
+Use `ict runtime` to run preprocessing, training, or Validation evaluation on the local machine, in Docker, or on a Linux SSH server. The [runtime guide](docs/runtime.md) covers setup, job recovery, device checks, and platform limitations.
+
 ## Acquire and verify dataset 71900
 
 ```text

@@ -27,6 +27,7 @@ from .pipeline.model import valid_id
 from .pipeline.runner import StageEvent
 from .pipeline.stages import pipeline_stages
 from .reporting.commands import compare, report, runs_app, status
+from .runtime.commands import runtime_app
 
 app = typer.Typer(
     name="ict",
@@ -39,6 +40,7 @@ app = typer.Typer(
 
 app.add_typer(data_app, name="data")
 app.add_typer(runs_app, name="runs")
+app.add_typer(runtime_app, name="runtime")
 app.command()(status)
 app.command()(compare)
 app.command()(report)
@@ -120,11 +122,11 @@ def _print_environment(report: EnvironmentReport) -> None:
     console = Console()
     console.print(table)
     console.print("Tool discovery")
-    for tool, status in report.tools.items():
-        console.print(f"  {tool}  {status}")
+    for tool, availability in report.tools.items():
+        console.print(f"  {tool}  {availability}")
     console.print("Execution modes")
-    for mode, status in report.execution_modes.items():
-        console.print(f"  {mode}  {status}")
+    for mode, availability in report.execution_modes.items():
+        console.print(f"  {mode}  {availability}")
     if report.recommendations:
         console.print("Recommendations")
         for recommendation in report.recommendations:
@@ -205,6 +207,13 @@ def _pipeline(config: Path | None, run_id: str | None, approve_download: bool = 
     values = merge_settings(files.config_text, os.environ, {})
     values.setdefault("dataset_source", "skip")
     settings = validate_settings(values, credentials).model_dump(exclude_none=True)
+    if settings["execution_mode"] in {"docker", "remote"}:
+        raise SetupError("Use ict runtime with --executor docker or --executor ssh for this execution mode.")
+    if settings["execution_mode"] == "wsl":
+        from .environment.probes import probe_host
+
+        if not probe_host().wsl:
+            raise SetupError("Open an existing WSL2 distribution and invoke ict inside it, using Linux paths.")
     for key in ("data_path", "output_path"):
         if key in settings:
             try:

@@ -104,7 +104,7 @@ class RunStore:
         _reject_link(self.directory)
 
     @contextmanager
-    def lock(self) -> Iterator[None]:
+    def lock(self) -> Iterator[BinaryIO]:
         self.directory.mkdir(parents=True, exist_ok=True)
         _reject_link(self.lock_path)
         # Leave the lock file in place. The OS releases the lock when the
@@ -112,7 +112,7 @@ class RunStore:
         with self.lock_path.open("a+b") as stream:
             if not _try_lock(stream):
                 raise PipelineError(f"Run {self.run_id} is active. Inspect it with ict status.")
-            yield
+            yield stream
 
     def read(self) -> RunState | None:
         _reject_link(self.state_path)
