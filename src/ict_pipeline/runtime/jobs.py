@@ -118,6 +118,17 @@ def preflight(store: RunStore, task: JobRequest) -> dict[str, object]:
             )
         except TrainingError as exc:
             report.update(ready=False, reason=store.credentials.redact_text(str(exc)))
+    elif task.model_run is not None:
+        from ..evaluation.runner import inspect_checkpoint
+
+        try:
+            checkpoint = inspect_checkpoint(absolute_path(task.model_run), "best", store.credentials)
+            backend = REGISTRY[checkpoint.name]
+            if task.device not in backend.devices:
+                raise EvaluationError("The model does not support the requested device.")
+            backend.versions()
+        except (EvaluationError, TrainingError) as exc:
+            report.update(ready=False, reason=store.credentials.redact_text(str(exc)))
     return report
 
 

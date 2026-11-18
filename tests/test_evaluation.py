@@ -152,9 +152,11 @@ def test_cli_refuses_missing_checkpoint_and_ground_truth(tmp_path: Path, monkeyp
 def test_cross_adapter_evaluation_and_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     data = tmp_path / "detection"
+    write_split(data, "train")
     write_split(data, "val")
     models = tuple(ModelName)
-    runs = tuple(write_run(tmp_path, name) for name in models)
+    references = inspect_data(data, "coco", Credentials()).split_fingerprints
+    runs = tuple(write_run(tmp_path, name, references) for name in models)
     loaded = {}
     ticks = iter(i / 4 for i in range(100))
     monkeypatch.setattr(runner, "perf_counter", lambda: next(ticks))
@@ -226,3 +228,24 @@ def test_held_out_requires_provenance_and_rejects_validation_comparison(tmp_path
     (data / "coco" / "images" / "test" / "test.png").write_bytes(b"val")
     with pytest.raises(EvaluationError, match="shares image"):
         evaluate(EvaluationSplit.TEST, True)
+
+
+def test_validation_rejects_train_images_presented_as_validation(tmp_path: Path) -> None:
+    data = tmp_path / "detection"
+    for split in ("train", "val"):
+        write_split(data, split)
+    references = inspect_data(data, "coco", Credentials()).split_fingerprints
+    run = write_run(tmp_path, ModelName.YOLO, references)
+    masquerading = tmp_path / "wrong-split"
+    write_split(masquerading, "val")
+    for image in (masquerading / "coco/images/val").iterdir():
+        image.write_bytes(image.stem.replace("val", "train").encode())
+
+    def factory(*_args: object) -> FakePredictor:
+        pytest.fail("Validation provenance must be checked before inference")
+
+    with pytest.raises(EvaluationError, match="recorded Validation split"):
+        list(runner.evaluate_runs(
+            tmp_path, (run,), masquerading, EvaluationSplit.VALIDATION, EvaluationConfig(), tmp_path / "results",
+            "best", False, None, None, lambda *_: None, factory,
+        ))

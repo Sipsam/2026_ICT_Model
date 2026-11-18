@@ -127,6 +127,10 @@ def inspect_data(
         splits = _read_yolo(directory) if data_format == "yolo" else {
             split: read_coco_split(directory, split) for split in SPLITS
         }
+        if data_format == "coco" and splits["train"].samples and not any(
+            sample.objects for sample in splits["train"].samples
+        ):
+            raise TrainingError("COCO training requires at least one labeled object in Train.")
         stage = f"fingerprint {data_format} images"
         total = sum(len(split.images) for split in splits.values())
         done = 0

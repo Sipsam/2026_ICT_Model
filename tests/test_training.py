@@ -3,6 +3,7 @@
 import csv
 import importlib.util
 import json
+import os
 from pathlib import Path
 from shutil import copyfile
 from types import ModuleType, SimpleNamespace
@@ -15,10 +16,12 @@ from ict_pipeline.cli import app
 from ict_pipeline.config.settings import Credentials
 from ict_pipeline.data.preprocessing.convert import convert_detection
 from ict_pipeline.data.preprocessing.policy import NAMES
+from ict_pipeline.evaluation.runner import read_report
 from ict_pipeline.models.contracts import Checkpoints, ModelName, TrainConfig, TrainingError, TrainingRequest
 from ict_pipeline.models.dataset import inspect_data
 from ict_pipeline.models.registry import Backend, REGISTRY, resolve_device
-from ict_pipeline.models.training import execute_training, plan_training
+from ict_pipeline.models.training import checkpoint_paths, execute_training, plan_training
+from ict_pipeline.models.yolo import YoloAdapter
 from ict_pipeline.pipeline.store import fingerprint_path
 
 
@@ -34,9 +37,10 @@ def detection(tmp_path: Path) -> Path:
         for index, split in enumerate(("train", "train", "validation", "validation"), 1):
             stem = f"sample-{index}"
             image, annotation = f"{stem}.jpg", f"{stem}.json"
-            Image.new("RGB", (64, 64), (index * 37, 0, 0)).save(source / image)
+            width, height = 64, 48 if split == "validation" else 64
+            Image.new("RGB", (width, height), (index * 37, 0, 0)).save(source / image)
             (source / annotation).write_text(json.dumps({
-                "images": [{"id": 1, "file_name": image, "width": 64, "height": 64}],
+                "images": [{"id": 1, "file_name": image, "width": width, "height": height}],
                 "annotations": [{"image_id": 1, "category_id": 30, "bbox": [8, 8, 24, 24]}] if index % 2 else [],
                 "sensor_data": {"defect_detected": 1},
             }), encoding="utf-8")
@@ -90,6 +94,33 @@ def test_duplicate_image_rejected(detection: Path) -> None:
     copyfile(folder / "train" / "sample-1.jpg", destination)
     with pytest.raises(TrainingError, match="duplicate"):
         inspect_data(detection, "coco", Credentials())
+
+
+def test_coco_training_rejects_train_without_objects(detection: Path) -> None:
+    annotation = detection / "coco/annotations/instances_train.json"
+    labels = json.loads(annotation.read_text(encoding="utf-8"))
+    labels["annotations"] = []
+    annotation.write_text(json.dumps(labels), encoding="utf-8")
+    with pytest.raises(TrainingError, match="at least one labeled object in Train"):
+        inspect_data(detection, "coco", Credentials())
+
+
+def test_yolo_creates_writable_config_parent_before_import(
+    detection: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "model"
+    data = inspect_data(detection, "yolo", Credentials())
+    adapter = YoloAdapter()
+
+    def train(request: TrainingRequest, _directory: Path) -> Checkpoints:
+        config_dir = Path(os.environ["YOLO_CONFIG_DIR"])
+        assert config_dir == request.output / "ultralytics-config"
+        assert config_dir.is_dir()
+        return checkpoint_paths(ModelName.YOLO, request.output)
+
+    monkeypatch.setattr(adapter, "_train", train)
+    request = TrainingRequest(TrainConfig(), data, output, "cpu", lambda *_: None)
+    assert adapter.train(request) == checkpoint_paths(ModelName.YOLO, output)
 
 
 def fake_torch(*, cuda: bool = False, hip: bool = False, mps: bool = False, bf16: bool = False) -> ModuleType:
@@ -209,13 +240,22 @@ def test_tiny_cpu_training(
 
             model, state = load_checkpoint(last)
             assert state["epoch"] == 0 and model.names == dict(enumerate(NAMES))
+            assert state["updates"] > 0
             with torch.inference_mode():
                 prediction, _ = model.eval()(torch.zeros(1, 3, 64, 64))
             assert prediction.shape[1] == 4 + len(NAMES)
         else:
             state = torch.load(last, weights_only=True)
+            assert state["epoch"] == 1
+            assert 0 <= state["val_loss"] < float("inf")
             adapter = REGISTRY[name].load()
-            model = adapter.build_model(TrainConfig(image_size=64)).eval()
+            config = TrainConfig(image_size=64)
+            torch.manual_seed(config.seed)
+            model = adapter.build_model(config).eval()
+            assert any(
+                not torch.equal(parameter, state["model"][key])
+                for key, parameter in model.named_parameters() if parameter.requires_grad
+            )
             model.load_state_dict(state["model"])
             with torch.inference_mode():
                 pixels = torch.zeros(1, 3, 64, 64)
@@ -224,6 +264,16 @@ def test_tiny_cpu_training(
                 assert "boxes" in prediction[0]
             else:
                 assert prediction.logits.shape[-1] == len(NAMES)
+        result = CliRunner().invoke(app, [
+            "evaluate", "--run", str(metadata_path.parent), "--dataset", str(detection),
+            "--device", "cpu", "--image-size", "64", "--warmup", "0",
+        ])
+        assert result.exit_code == 0, result.output
+        report, = (tmp_path / "outputs/evaluation").glob("*/*-*.json")
+        scored = read_report(report)
+        assert scored["dataset"]["image_count"] == 2
+        assert scored["speed"]["timed_images"] == 2
+        assert 0 <= scored["metrics"]["map50_95"] <= 1
         assert fingerprint_path(detection) == before
     finally:
         torch.set_num_threads(threads)

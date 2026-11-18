@@ -52,7 +52,8 @@ def _local(path: Path, workspace: Path, credentials: Credentials) -> Path:
     return resolved
 
 
-def _checkpoint(run: Path, kind: CheckpointKind, credentials: Credentials) -> Checkpoint:
+def inspect_checkpoint(run: Path, kind: CheckpointKind, credentials: Credentials) -> Checkpoint:
+    """Verify a completed model run and its recorded checkpoint without loading weights."""
     try:
         metadata = json.loads((run / "run.json").read_text(encoding="utf-8"))
         name = ModelName(metadata["model"])
@@ -233,10 +234,11 @@ def evaluate_runs(
             attempt.enter_context(track_attempt(store, workspace, "evaluation", configuration, packages, safe_errors))
             store.log({"time": timestamp(), "stage": "evaluation preflight"})
 
-        checkpoints = [_checkpoint(source, kind, credentials) for source in sources]
+        checkpoints = [inspect_checkpoint(source, kind, credentials) for source in sources]
 
         try:
             labels, hashes, annotation_hash, snapshots = _split(dataset, split, credentials, progress, labels_required=True)
+            image_fingerprint = digest_json(hashes)
             reference_hashes = {}
             if split == EvaluationSplit.TEST:
                 for name in ("train", "val"):
@@ -247,12 +249,18 @@ def evaluate_runs(
                     snapshots.update(reference_snapshots)
                 if any(reference_hashes != checkpoint.split_fingerprints for checkpoint in checkpoints):
                     raise EvaluationError("Reference splits must match the recorded Train and Validation of every model.")
+            elif any(
+                not isinstance(checkpoint.split_fingerprints, dict)
+                or checkpoint.split_fingerprints.get("val") != image_fingerprint
+                for checkpoint in checkpoints
+            ):
+                raise EvaluationError("Validation images must match the recorded Validation split of every model.")
         except (OSError, ValueError, TypeError, KeyError):
             raise EvaluationError("Cannot read or validate the labeled COCO split. Check annotations and image paths.") from None
 
         dataset_record = {
             "split": split.value, "role": "held_out_test" if held_out else "validation_for_tuning",
-            "held_out_attested": held_out, "image_count": len(labels.images), "image_fingerprint": digest_json(hashes),
+            "held_out_attested": held_out, "image_count": len(labels.images), "image_fingerprint": image_fingerprint,
             "annotation_fingerprint": annotation_hash, "reference_split_fingerprints": reference_hashes,
         }
         package = Path(__file__).parents[1]

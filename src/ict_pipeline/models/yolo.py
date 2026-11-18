@@ -32,9 +32,12 @@ class YoloAdapter:
                 copyfile(label, labels / label.name)
                 copied += 1
                 request.progress("copy YOLO inputs", copied, total)
+        config_dir = request.output / "ultralytics-config"
+        # Ultralytics falls back to a global or CWD directory if this parent is missing.
+        config_dir.mkdir(exist_ok=True)
         with patch.dict(os.environ, {
             "YOLO_AUTOINSTALL": "false", "YOLO_OFFLINE": "true",
-            "YOLO_CONFIG_DIR": str(request.output / "ultralytics-config"),
+            "YOLO_CONFIG_DIR": str(config_dir),
         }):
             return self._train(request, directory)
 

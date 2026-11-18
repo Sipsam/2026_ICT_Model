@@ -127,6 +127,28 @@ def test_training_reuses_config_and_explicit_device(
     assert plans[0].models[ModelName.YOLO].epochs == 1
 
 
+def test_evaluation_preflight_rejects_missing_best_checkpoint(
+    target: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from test_evaluation import write_run
+
+    workspace, dataset = target
+    (dataset / "coco").mkdir()
+    model_run = write_run(tmp_path, ModelName.YOLO)
+    training.checkpoint_paths(ModelName.YOLO, model_run).best.unlink()
+    monkeypatch.setattr(jobs, "collect_environment", lambda _path: SimpleNamespace(
+        torch=Torch("available", version="2.6", cpu=Backend("available", "available")),
+        graphics=SimpleNamespace(nvidia_driver=None, devices=()),
+    ))
+    task = JobRequest(workflow="evaluate", dataset=str(dataset), model_run=str(model_run))
+    result = LocalExecutor().execute(WorkerRequest(
+        action="preflight", workspace=str(workspace), job="evaluation", task=task,
+    ))
+    assert not result["ready"]
+    assert "best checkpoint is missing" in result["reason"]
+    assert not list(workspace.iterdir())
+
+
 def test_destination_cannot_contain_a_writable_alias_of_source(
     target: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
