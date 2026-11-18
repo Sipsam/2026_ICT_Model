@@ -47,7 +47,7 @@ class StageRunner:
         self,
         stages: Iterable[Stage],
         workspace: Path,
-        settings: Mapping[str, str],
+        settings: Mapping[str, object],
         *,
         on_event: Callable[[StageEvent], None] | None = None,
         credentials: Credentials | None = None,
@@ -165,7 +165,7 @@ class StageRunner:
             "Include it and any missing prerequisites in the run."
         )
 
-    def _stage_settings(self, stage: Stage) -> dict[str, str]:
+    def _stage_settings(self, stage: Stage) -> dict[str, object]:
         return {key: self.settings[key] for key in stage.config_keys if key in self.settings}
 
     def _inputs(

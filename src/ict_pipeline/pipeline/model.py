@@ -54,7 +54,7 @@ class StageResult(Enum):
 @dataclass(frozen=True)
 class StageContext:
     inputs: Mapping[str, Path]
-    settings: Mapping[str, str]
+    settings: Mapping[str, object]
     output_dir: Path
     artifact_dir: Path
     progress: Callable[[int, int | None], None]

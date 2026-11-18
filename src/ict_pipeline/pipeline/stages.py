@@ -4,14 +4,20 @@ from collections.abc import Callable
 from importlib.metadata import version
 from pathlib import Path
 
+from ..classification import stages as classification_stages
+from ..classification.contracts import LABEL_POLICY, SCHEMA_VERSION, ClassificationConfig
 from ..data.preprocessing import stages as preprocessing
 from ..data.preprocessing.policy import POLICY_VERSION
 from ..data.stages import DataStages
 from .model import Stage, StageContext, StageInput, StageResult
+from .store import digest_json, fingerprint_path
+
+CLASSIFICATION_STAGES = ("classification_prepare", "classification_train", "classification_evaluate")
 
 
 def pipeline_stages(
     data: DataStages | None = None, *, dataset_root: Path | None = None,
+    classification: ClassificationConfig | None = None, approve_train: bool = False,
 ) -> tuple[Stage, ...]:
     revision = version("ict-pipeline")
 
@@ -43,7 +49,7 @@ def pipeline_stages(
     data_version = f"{revision}:ingestion-v1:{data.acquisition.selection.fingerprint}" if data else revision
     preprocessing_version = f"{revision}:preprocessing-v1:{POLICY_VERSION}"
 
-    return (
+    detection_stages = (
         stage("download", existing, ("archives",), data_config, data.download if data else None, data_version),
         stage("extract", (artifact("download", "archives"), *existing), ("dataset",), data_config,
               data.extract if data else None, data_version),
@@ -66,4 +72,25 @@ def pipeline_stages(
         stage("validate_models", (detection, checkpoints), ("predictions",), ("model", "device")),
         stage("evaluate", (detection, artifact("validate_models", "predictions")), ("metrics.json",)),
         stage("report", (artifact("evaluate", "metrics.json", name="metrics"),), ("report.html",)),
+    )
+    if classification is None:
+        return detection_stages
+
+    prepare, train, evaluate = CLASSIFICATION_STAGES
+    classification_root = StageInput("dataset", data.existing) if data and data.existing is not None else dataset
+    prepared = (artifact(prepare, "samples.jsonl", name="samples"), artifact(prepare, "alignment.json", name="alignment"))
+    config_keys = ("classification",)
+    code = Path(classification_stages.__file__).parent
+    code_fingerprint = digest_json({file.name: fingerprint_path(file) for file in sorted(code.glob("*.py"))})
+    adapters = classification_stages.ClassificationStages(classification, code_fingerprint, approved=approve_train)
+    classification_version = f"{revision}:{SCHEMA_VERSION}:{LABEL_POLICY}:{POLICY_VERSION}:{code_fingerprint}"
+    alignment_options = classification.model_dump(include={"sensor_value_atol", "group_policy"})
+    prepare_version = f"{classification_version}:{digest_json(alignment_options)}"
+    fitting_version = f"{classification_version}:{digest_json(classification.model_dump())}"
+    return detection_stages + (
+        stage(prepare, (classification_root,), ("samples.jsonl", "alignment.json", "alignment_issues.csv"),
+              execute=adapters.prepare, stage_version=prepare_version),
+        stage(train, prepared, ("checkpoint.json",), config_keys, adapters.train, fitting_version),
+        stage(evaluate, (*prepared, artifact(train, "checkpoint.json", name="checkpoint")),
+              ("comparison.json", "comparison.csv", "predictions.csv"), config_keys, adapters.evaluate, fitting_version),
     )

@@ -25,7 +25,7 @@ from .models.contracts import ModelName, TrainingError
 from .pipeline import PipelineError, StageRunner
 from .pipeline.model import valid_id
 from .pipeline.runner import StageEvent
-from .pipeline.stages import pipeline_stages
+from .pipeline.stages import CLASSIFICATION_STAGES, pipeline_stages
 from .pipeline.store import RunState, RunStore
 from .reporting.commands import compare, report, runs_app, status
 from .runtime.commands import runtime_app
@@ -198,7 +198,9 @@ def _pipeline_progress(event: StageEvent) -> None:
     )
 
 
-def _pipeline(config: Path | None, run_id: str | None, approve_download: bool = False) -> StageRunner:
+def _pipeline(
+    config: Path | None, run_id: str | None, approve_download: bool = False, approve_train: bool = False,
+) -> StageRunner:
     from .config.storage import SetupFiles
 
     root = Path.cwd()
@@ -209,7 +211,8 @@ def _pipeline(config: Path | None, run_id: str | None, approve_download: bool = 
     values.setdefault("dataset_source", "skip")
     if values["dataset_source"] == "skip" and values.get("data_path") is None:
         values["data_path"] = str(load_selection().extracted_root)
-    settings = validate_settings(values, credentials).model_dump(exclude_none=True)
+    resolved = validate_settings(values, credentials)
+    settings = resolved.model_dump(exclude_none=True)
     if settings["execution_mode"] in {"docker", "remote"}:
         raise SetupError("Use ict runtime with --executor docker or --executor ssh for this execution mode.")
     if settings["execution_mode"] == "wsl":
@@ -236,9 +239,12 @@ def _pipeline(config: Path | None, run_id: str | None, approve_download: bool = 
             lambda missing: show_download_plan(acquisition, missing),
         )
     if data is not None:
-        stages = pipeline_stages(data)
+        stages = pipeline_stages(data, classification=resolved.classification, approve_train=approve_train)
     else:
-        stages = pipeline_stages(dataset_root=Path(settings["data_path"]))
+        stages = pipeline_stages(
+            dataset_root=Path(settings["data_path"]), classification=resolved.classification,
+            approve_train=approve_train,
+        )
     return StageRunner(stages, root, settings, on_event=_pipeline_progress, credentials=credentials)
 
 
@@ -253,6 +259,9 @@ def _pipeline_failure(exc: Exception) -> NoReturn:
 RunIdOption = Annotated[str | None, typer.Option(help="Identify a saved run under runs/.")]
 ConfigOption = Annotated[Path | None, typer.Option(help="Read settings from this YAML file.")]
 ApprovalOption = Annotated[bool, typer.Option("--approve-download", help="Authorize missing AI Hub transfers.")]
+ClassificationApproval = Annotated[
+    bool, typer.Option("--approve-train", help="Authorize CPU image-level classification training.")
+]
 
 
 def _print_completed(runner: StageRunner, state: RunState) -> None:
@@ -261,9 +270,18 @@ def _print_completed(runner: StageRunner, state: RunState) -> None:
         store = RunStore(runner.runs_dir, state.run_id)
         detection = store.artifact_dir("convert", state.stages["convert"].attempt) / "detection"
         typer.echo(f"Detection dataset   {detection}")
+    evaluated = CLASSIFICATION_STAGES[-1]
+    if evaluated in state.selection:
+        store = RunStore(runner.runs_dir, state.run_id)
+        comparison = store.artifact_dir(evaluated, state.stages[evaluated].attempt) / "comparison.json"
+        typer.echo(f"Classification comparison   {comparison}")
+    elif (prepared := CLASSIFICATION_STAGES[0]) in state.selection:
+        store = RunStore(runner.runs_dir, state.run_id)
+        alignment = store.artifact_dir(prepared, state.stages[prepared].attempt) / "alignment.json"
+        typer.echo(f"Classification alignment   {alignment}")
 
 
-@app.command(help="Prepare detection data through validation, or select specific stages.")
+@app.command(help="Prepare detection data, run configured classification, or select specific stages.")
 def run(
     dry_run: Annotated[bool, typer.Option(help="Print the plan without writing run files.")] = False,
     start: Annotated[str | None, typer.Option("--from", help="First stage in the range.")] = None,
@@ -273,10 +291,19 @@ def run(
     run_id: RunIdOption = None,
     config: ConfigOption = None,
     approve_download: ApprovalOption = False,
+    approve_train: ClassificationApproval = False,
 ) -> None:
     try:
-        runner = _pipeline(config, run_id, approve_download)
-        if not only and "validate_detection" in runner.graph.stages:
+        runner = _pipeline(config, run_id, approve_download, approve_train)
+        if (
+            not only and start is None and CLASSIFICATION_STAGES[0] in runner.graph.stages
+            and (until is None or until in CLASSIFICATION_STAGES)
+        ):
+            prepare, _, evaluate = CLASSIFICATION_STAGES
+            acquisition = ["download", "extract"] if runner.graph.stages[prepare].dependencies else []
+            only = [*acquisition, *CLASSIFICATION_STAGES[:CLASSIFICATION_STAGES.index(until or evaluate) + 1]]
+            until = None
+        elif not only and "validate_detection" in runner.graph.stages:
             order = runner.graph.order
             preparation = order[:order.index("validate_detection") + 1]
             if start is None and runner.settings["dataset_source"] == "skip" and until not in {"download", "extract"}:
@@ -284,6 +311,8 @@ def run(
             if until is None and (start is None or start in preparation):
                 until = "validate_detection"
         selection = runner.graph.select(start, until, only or ())
+        if (dry_run or approve_train) and CLASSIFICATION_STAGES[1] in selection:
+            typer.echo(f"Classification training   CPU   artifacts under {runner.runs_dir}")
         if dry_run:
             for step in runner.plan(selection, run_id=run_id, force=force):
                 typer.echo(f"{step.stage}   {step.action}")
@@ -302,9 +331,10 @@ def run(
 @app.command(help="Resume the last selection for a saved run and verify its cached results.")
 def resume(
     run_id: RunIdOption = None, config: ConfigOption = None, approve_download: ApprovalOption = False,
+    approve_train: ClassificationApproval = False,
 ) -> None:
     try:
-        runner = _pipeline(config, run_id, approve_download)
+        runner = _pipeline(config, run_id, approve_download, approve_train)
         _print_completed(runner, runner.resume(run_id))
     except (PipelineError, SetupError, DataError, OSError, ValueError) as exc:
         _pipeline_failure(exc)

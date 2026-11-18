@@ -197,6 +197,53 @@ Conversion keeps the original Train and Validation assignments and exports only 
 
 The four commands under `scripts/` retain their standalone arguments and default paths. Standalone manifests use the legacy repository-relative paths. Pass `--overwrite` to authorize replacing existing standalone reports. Standalone conversion requires a fresh output directory and keeps its legacy hard-link default. Pipeline conversion copies images.
 
+## Sensor and image-level classification
+
+Use the preprocessing dependencies for JPG and XLSX decoding. The classification models run on CPU with no pretrained weights. Put this configuration in a file such as `classification.yaml` and point `data_path` at the extracted dataset.
+
+```yaml
+dataset_source: existing
+data_path: data/extracted
+classification:
+  mode: fusion            # sensor, unimodal, or fusion
+  sensor_model: logistic  # logistic or centroid
+  missing: available      # available or paired
+  group_policy: session   # session, source_day, or source
+  sensor_window_seconds: 0
+  sensor_value_atol: 0.001
+  seed: 42
+  epochs: 20
+  learning_rate: 0.05
+```
+
+```text
+ict run --config classification.yaml --run-id classifier --dry-run
+ict run --config classification.yaml --run-id classifier --until classification_prepare
+ict run --config classification.yaml --run-id classifier --approve-train
+ict resume --config classification.yaml --run-id classifier --approve-train
+```
+
+Omit `classification` for the default detection workflow. An explicit detection range such as `--from audit --until validate_detection` also works with the configuration above after the existing detection prerequisites are available. Pass training approval again on resume if training needs to be retried. Completed stages reuse fingerprinted artifacts. An interrupted training stage restarts its fit from the configured seed. Run state records the Git revision and runtime.
+
+### Samples and leakage controls
+
+- Classification reads the original SMT Train and Validation annotation, image, and sensor directories. It pairs sibling files by stem, verifies JPEG metadata, and accepts embedded JSON `sensor_sequence`, XLSX, or both. Each sequence uses ordered ISO timestamps and five finite values in this order: temperature (°C), humidity (%), vibration (m/s²), acceleration (g), and noise (dB). Two available copies must agree row for row on length, timestamps, and measurement values within the configured absolute tolerance. The first sensor timestamp must agree with the capture time when the filename or image metadata provides one. Sensor/image ID offsets are tracked as metadata. With a single sensor source, cross-file value agreement is unavailable.
+- Image label policy `smt-target-defect-presence-v1` assigns 1 for the presence of a target defect box and 0 for a normal sample with no target defect box. The SMT filename and annotation checks screen for contradictions and unsupported categories. An available `defect_detected` value may corroborate the label. Features are restricted to the five measured channels and RGB pixels. Boxes, label fields, filenames, source and session IDs, and absolute timestamps stay out of model input. Detection keeps its five-class object label policy.
+- Both original splits are preserved. The audit quarantines cross-split duplicate stems, exact JPEG bytes, exact timestamped sequences, explicit production sessions, and exact source/capture overlaps. Optional `production_session_id` values in annotation or sensor metadata are scoped by source. The audit reports source/day and source overlaps, which can also be excluded with `group_policy`. Filename groups are proxies for production sessions. Incomplete session metadata, near duplicates, and source-specific signatures limit claims about generalization to new production lines.
+- Sensor features summarize the mean, population standard deviation, and rate of change of measurements within the configured cutoff, measured in seconds after capture. The default uses the first reading only. Without a capture time the first reading anchors the window. Confirm that the chosen readings and JPG are available at the intended decision time, including whether images or measurements were produced after inspection. Standardization and model fitting use Train only.
+
+### Model and report artifacts
+
+The `sensor` mode fits a sensor-only classifier. `unimodal` adds a logistic classifier on 8×8 RGB thumbnails. `fusion` also averages the two classifier scores. With `missing: available`, each model uses samples with its input, and fusion uses the available score on single-modality samples. With `missing: paired`, both training and scoring require both inputs. Conflicting or corrupt files are flagged rather than treated as absent.
+
+| Stage | Outputs |
+| --- | --- |
+| `classification_prepare` | `samples.jsonl` with versioned normalized samples, `alignment.json` with split and grouping checks, and `alignment_issues.csv` with sample dispositions |
+| `classification_train` | `checkpoint.json` with feature order, Train normalization and fitted weights, model configuration, and data and implementation fingerprints |
+| `classification_evaluate` | `comparison.json`, `comparison.csv`, and `predictions.csv` for Validation |
+
+Use the `paired` report rows to compare modalities on the same Validation samples. The `available`, `sensor_only`, and `image_only` rows show coverage and behavior under missing inputs. Available-input training cohorts can differ by modality. The comparison uses a fixed threshold of 0.5 and reports confusion counts, accuracy, balanced accuracy, precision, recall, and F1. Undefined metrics are empty in CSV and null in JSON. Scores are uncalibrated.
+
 ## Environment diagnostics
 
 `ict doctor` displays the local report. `ict doctor --json` writes one JSON document to stdout using the [version 1 schema](docs/doctor.schema.json). A completed report exits with status `0` even when optional tools or backends are unavailable. Missing measurements use `null`. Capabilities use `available`, `unavailable`, or `unknown`. Memory and disk measurements are in bytes, and free disk refers to the filesystem containing the current directory. RAM and logical CPU counts describe the environment as reported by the OS and may exceed container limits.

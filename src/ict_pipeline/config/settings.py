@@ -1,5 +1,6 @@
 """Resolve and validate setup settings without importing runtime backends."""
 
+import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -16,6 +17,8 @@ from pydantic import (
     ValidationInfo,
     field_validator,
 )
+
+from ..classification.contracts import ClassificationConfig
 
 
 class SetupError(Exception):
@@ -44,6 +47,7 @@ class Settings(BaseModel):
     device: Literal["auto", "cpu", "cuda", "rocm", "mps"]
     training_profile: Literal["smoke", "standard", "full"]
     tracking: Literal["off", "local", "mlflow"]
+    classification: ClassificationConfig | None = None
 
     @field_validator("data_path", "output_path")
     @classmethod
@@ -170,7 +174,13 @@ def merge_settings(
     for name in Settings.model_fields:
         env_name = f"ICT_{name.upper()}"
         if env_name in environ:
-            merged[name] = environ[env_name]
+            if name == "classification":
+                try:
+                    merged[name] = json.loads(environ[env_name])
+                except ValueError:
+                    raise SetupError("ICT_CLASSIFICATION must be a JSON object or null.") from None
+            else:
+                merged[name] = environ[env_name]
     merged.update(overrides)
     return merged
 
