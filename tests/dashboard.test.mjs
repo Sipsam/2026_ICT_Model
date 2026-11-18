@@ -1,11 +1,32 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  boxPercent, buildFilters, dailySeries, defaultDateRange, detectionRows, inspectionRecord, pageParams,
+  boxPercent, buildFilters, dailySeries, defaultDateRange, detectionRows, inspectionRecord, pageParams, productEvidence,
 } from "../src/ict_pipeline/api/dashboard/client.mjs";
 
 const dates = {from: "2026-10-30", through: "2026-11-02"};
 const id = "00000000-0000-4000-8000-000000000001";
+
+test("product evidence distinguishes pairing, fallback, untrained scores, and missing inputs", () => {
+  const product = {
+    schema_version: 1, input_mode: "paired", branch: "image", sensor_status: "insufficient_steps",
+    weight_status: "untrained", alignment: "verified_receipt", threshold: 0.5, score_kind: "uncalibrated_sigmoid",
+    scores: [{name: "any_target_defect", score: 0.79, threshold_crossed: true}],
+  };
+  const view = productEvidence(product);
+  assert.equal(view.input, "Paired image and sensor");
+  assert.equal(view.branch, "Image");
+  assert.equal(view.sensor, "Insufficient observed steps");
+  assert.equal(view.alignment, "Verified pairing receipt");
+  assert.equal(view.status, "Untrained weights");
+  assert.equal(view.scoreLabel, "Uncalibrated scores");
+  assert.equal(buildFilters({...dates, modality: "sensor"}).get("modality"), "sensor");
+  const missing = productEvidence({...product, input_mode: "sensor", branch: null,
+    weight_status: "unavailable", alignment: "not_applicable", sensor_status: "no_observations", scores: []});
+  assert.equal(missing.branch, "Unavailable");
+  assert.deepEqual(missing.scores, []);
+  assert.throws(() => productEvidence({...product, scores: [{name: "any_target_defect", score: NaN}]}), /unsupported/);
+});
 
 test("dashboard defaults to production data and the last 30 UTC dates", () => {
   assert.deepEqual(defaultDateRange(new Date("2026-01-01T00:12:00Z")), ["2025-12-03", "2026-01-01"]);

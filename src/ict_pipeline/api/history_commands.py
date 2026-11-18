@@ -15,7 +15,7 @@ from ..config.settings import Credentials, SetupError
 from ..config.storage import SetupFiles
 from ..data.preprocessing.common import require_separate_output
 from ..data.preprocessing.console import fresh_output
-from ..inspection.contracts import InspectionError, Outcome
+from ..inspection.contracts import InspectionError, Modality, Outcome
 from ..inspection.service import local_path
 from ..models.contracts import ModelName
 from .history import ExportFormat, HistoryQuery, Mode, Order
@@ -41,12 +41,14 @@ def history_options(
     model: ModelName | None = None,
     mode: Mode = "all",
     order: Order = "newest",
+    modality: Modality | None = None,
 ) -> None:
     """Filters and ordering for list and export."""
     try:
         ctx.obj = HistoryQuery.model_validate({
             "created_from": created_from, "created_before": created_before, "status": status,
             "defect_class": defect_class, "model_id": model_id, "model": model, "mode": mode, "order": order,
+            "modality": modality,
         })
     except ValidationError:
         raise typer.BadParameter("Invalid history filters. Supply ordered timestamps with UTC offsets and canonical IDs.") from None

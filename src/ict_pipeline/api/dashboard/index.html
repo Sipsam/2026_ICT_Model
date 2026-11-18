@@ -43,6 +43,9 @@
           <select name="model"><option value="">All families</option><option>yolo</option><option>faster_rcnn</option><option>rt_detr</option></select>
         </label>
         <label>Model ID<input name="model_id" type="search" placeholder="Exact model ID" maxlength="64" pattern="[a-z0-9][a-z0-9_\-]{0,63}"></label>
+        <label>Modality
+          <select name="modality"><option value="">All modalities</option><option value="image">Image</option><option value="sensor">Sensor</option><option value="paired">Paired</option></select>
+        </label>
         <label class="id-filter">Inspection ID<input name="inspection_id" type="search" placeholder="Exact inspection UUID" maxlength="36" autocomplete="off"></label>
       </div>
       <div class="filter-actions">
@@ -78,7 +81,7 @@
           <article class="panel chart trend-card"><h3>Daily inspection trend</h3><p>Inspections per UTC day</p><div id="trend"></div></article>
           <article class="panel chart"><h3>Inspection status</h3><p>Inspections by outcome</p><div id="statuses"></div></article>
           <article class="panel chart"><h3>Defect distribution</h3><p>Detections by class with matching inspection counts</p><div id="defects"></div></article>
-          <article class="panel chart"><h3>Detector models</h3><p>Inspections by public model ID</p><div id="models"></div></article>
+          <article class="panel chart"><h3>Models</h3><p>Inspections by public model ID</p><div id="models"></div></article>
         </div>
       </div>
     </section>

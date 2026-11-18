@@ -7,12 +7,13 @@ from typing import Annotated
 from uuid import uuid4
 
 import typer
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from ..config.settings import SetupError
 from ..config.storage import SetupFiles
 from ..data.preprocessing.common import require_separate_output
 from ..data.preprocessing.console import fresh_output, protect_source_data
+from ..multimodal.inference_contracts import ProductInspectionInput, ProductModelSpec
 from ..pipeline.model import PipelineError
 from .contracts import CheckpointKind, Device, InspectionError, InspectionRequest, InspectionThresholds, MockScenario
 from .records import publish_batch, read_manifest, write_records
@@ -35,9 +36,18 @@ def inspect_command(
     image_size: Annotated[int | None, typer.Option(help="Override saved model resize size with a multiple of 32.")] = None,
     output_dir: Annotated[Path, typer.Option(help="Parent for new inspection attempts.")] = Path("outputs/inspection"),
     resume_from: Annotated[Path | None, typer.Option(help="Resume an unpublished batch attempt.")] = None,
+    product_model: Annotated[Path | None, typer.Option(help="Local product model settings JSON.")] = None,
+    product_request: Annotated[Path | None, typer.Option(help="Local product request JSON with optional sensor evidence.")] = None,
 ) -> None:
-    """Inspect an image or batch using a trusted local detector or explicit simulation."""
-    if (image is None) == (batch is None) or (mock is None) == (run is None):
+    """Inspect images or product evidence with a local model or explicit simulation."""
+    if product_model is not None or product_request is not None:
+        if (product_model is None or product_request is None or batch is not None or mock is not None
+                or request_id is not None or source_id is not None):
+            raise typer.BadParameter("Use --product-model and --product-request together with an optional image and detector run.")
+        if run is None and (trust_run or expected_fingerprint is not None or checkpoint != "best"
+                            or device != "cpu" or image_size is not None):
+            raise typer.BadParameter("Configure the product device in --product-model. Detector options require --run.")
+    elif (image is None) == (batch is None) or (mock is None) == (run is None):
         raise typer.BadParameter("Choose IMAGE or --batch, and choose --mock or --run.")
     if batch is not None and (request_id is not None or source_id is not None):
         raise typer.BadParameter("Supply request and source identifiers in the batch manifest.")
@@ -73,7 +83,12 @@ def inspect_command(
         destination = resume if resume is not None else output
         protect_source_data(destination, workspace)
         thresholds = InspectionThresholds(confidence=confidence, nms_iou=nms_iou)
-        if batch is not None:
+        if product_model is not None and product_request is not None:
+            product_config_path = local_path(product_model, workspace, credentials)
+            product_input_path = local_path(product_request, workspace, credentials)
+            spec = TypeAdapter(ProductModelSpec).validate_json(product_config_path.read_bytes())
+            product_input = ProductInspectionInput.model_validate_json(product_input_path.read_bytes())
+        elif batch is not None:
             manifest = read_manifest(local_path(batch, workspace, credentials))
         else:
             assert image is not None
@@ -91,11 +106,23 @@ def inspect_command(
                 run, trust_run=trust_run, thresholds=thresholds, checkpoint_kind=checkpoint,
                 expected_fingerprint=expected_fingerprint, device=device, image_size=image_size, credentials=credentials,
             )
-        else:
+        elif product_model is None:
             assert mock is not None
             service = InspectionService.mock(mock, thresholds=thresholds, credentials=credentials)
 
-        if batch is not None:
+        if product_model is not None:
+            typer.echo("initialize local product inference", err=True)
+            service = InspectionService.from_product(
+                spec, product_config_path.parent, credentials=credentials,
+                detector=service if run is not None else None,
+            )
+            progress("inspect product", 0, 1)
+            result = service.inspect_product(product_input, image)
+            reports = output / uuid4().hex
+            with fresh_output(reports, product_input_path) as working:
+                complete = write_records(working, (result,))
+            progress("inspect product", 1, 1)
+        elif batch is not None:
             reports, complete = publish_batch(service, manifest, output, progress, resume_from=resume)
         else:
             reports = output / uuid4().hex

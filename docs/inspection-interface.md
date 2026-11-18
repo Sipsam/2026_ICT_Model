@@ -37,6 +37,16 @@ source-unit values in the existing `sensor.values` dictionary and omit missing
 channels. Padded or scaled dataset values are reserved for downstream model
 inputs. [Multimodal sequence contracts](multimodal-data.md)
 
+## Product requests
+
+`ict inspect --product-model SPEC.json --product-request INPUT.json` accepts
+sensor-only product evidence. Pass a positional image for image-only or paired
+product inference. A paired request requires a matching trusted pairing receipt.
+The result keeps the existing top-level fields and adds an optional version 1
+`multimodal` object for product scores, modality status, model version, and
+alignment. The legacy `sensor` field remains observational image metadata.
+[Product request and checkpoint examples](multimodal-inference.md)
+
 ## Results
 
 The JSON document contains `schema_version: 1` and a `records` array. Each record includes request and source identifiers when available, outcome and reason, image dimensions and content SHA-256 when a validated image is available, provenance, thresholds, and detections. Real provenance includes the model, checkpoint selection and fingerprints, resolved device, resize setting, and backend package versions. Detection boxes are `[x_min, y_min, x_max, y_max]` in absolute original-image pixels and retain their model confidence. IDs follow the canonical mapping.
@@ -52,7 +62,7 @@ The JSON document contains `schema_version: 1` and a `records` array. Each recor
 | Outcome | Meaning |
 | --- | --- |
 | `defect_detected` | Real inference retained at least one detection at the configured thresholds. |
-| `review_required` | Real inference retained no detections (`no_detections`), or the run was simulated (`simulated_prediction`). Inspect the reason and provenance before acting. |
+| `review_required` | Image inference retained no detections (`no_detections`), inference was simulated (`simulated_prediction`), or product evidence requires review (`product_review`, `product_unavailable`). Inspect the reason and provenance before acting. |
 | `inference_failed` | The request, image, or prediction failed. The reason is a stable code and the detection list is empty. |
 | `pass` | Reserved for independent verification of a good product. A valid record requires `verification_reference`. The service and CLI always require review for an empty real prediction. |
 

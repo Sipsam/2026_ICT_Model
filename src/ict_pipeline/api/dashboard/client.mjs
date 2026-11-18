@@ -39,7 +39,7 @@ export function buildFilters(values) {
     created_from: new Date(from).toISOString(),
     created_before: new Date(before).toISOString(),
   });
-  for (const field of ["status", "defect_class", "model", "model_id"]) {
+  for (const field of ["status", "defect_class", "model", "model_id", "modality"]) {
     if (values[field]) params.set(field, values[field]);
   }
   if (id) params.set("inspection_id", id);
@@ -104,7 +104,40 @@ export function inspectionRecord(record) {
     && STATUSES.has(result.outcome) && typeof result.reason === "string"
     && textOrNull(result.request_id) && textOrNull(result.source_id)
     && ["real", "mock"].includes(result.provenance?.mode));
+  if (result.multimodal != null) productEvidence(result.multimodal);
   return record;
+}
+
+const MODALITIES = new Map([["image", "Image"], ["sensor", "Sensor"], ["paired", "Paired image and sensor"]]);
+const SENSOR_STATUS = new Map([
+  ["absent", "Absent"], ["available", "Available"], ["no_observations", "No usable observations"],
+  ["insufficient_steps", "Insufficient observed steps"],
+]);
+const PRODUCT_STATUS = new Map([
+  ["simulated", "Simulated fixture"], ["untrained", "Untrained weights"],
+  ["trusted_trained", "Trusted trained weights"], ["unavailable", "Prediction unavailable"],
+]);
+
+export function productEvidence(product) {
+  requirePayload(product?.schema_version === 1 && MODALITIES.has(product.input_mode)
+    && (product.branch === null || MODALITIES.has(product.branch))
+    && SENSOR_STATUS.has(product.sensor_status) && PRODUCT_STATUS.has(product.weight_status)
+    && ["verified_receipt", "not_applicable"].includes(product.alignment)
+    && ["uncalibrated_sigmoid", "simulated_fixture"].includes(product.score_kind)
+    && Number.isFinite(product.threshold) && product.threshold >= 0 && product.threshold <= 1
+    && Array.isArray(product.scores) && product.scores.every(row =>
+      ["any_target_defect", ...CLASSES].includes(row?.name)
+      && Number.isFinite(row.score) && row.score >= 0 && row.score <= 1
+      && typeof row.threshold_crossed === "boolean"));
+  return {
+    input: MODALITIES.get(product.input_mode),
+    branch: MODALITIES.get(product.branch) ?? "Unavailable",
+    sensor: SENSOR_STATUS.get(product.sensor_status),
+    status: PRODUCT_STATUS.get(product.weight_status),
+    alignment: product.alignment === "verified_receipt" ? "Verified pairing receipt" : "Not applicable",
+    scoreLabel: product.score_kind === "simulated_fixture" ? "Fixture scores" : "Uncalibrated scores",
+    scores: product.scores,
+  };
 }
 
 export function imageSize(image) {

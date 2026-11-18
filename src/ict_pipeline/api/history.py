@@ -9,7 +9,7 @@ from typing import Annotated, Literal, Protocol, Self, runtime_checkable
 from pydantic import UUID4, AfterValidator, AwareDatetime, BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
 from ..evaluation.contracts import CLASSES
-from ..inspection.contracts import Contract, Outcome, SchemaVersion
+from ..inspection.contracts import Contract, Modality, Outcome, SchemaVersion
 from ..models.contracts import ModelName
 from .schemas import StoredInspection
 from .settings import ModelID
@@ -49,6 +49,7 @@ class HistoryFilter(BaseModel):
     model_id: ModelID | None = None
     model: ModelName | None = None
     mode: Mode = "all"
+    modality: Modality | None = None
     inspection_id: UUID4 | None = None
 
     @model_validator(mode="after")
@@ -158,6 +159,9 @@ def matches(record: StoredInspection, filters: HistoryFilter, cutoff: datetime |
         and (filters.status is None or filters.status == result.outcome)
         and (filters.inspection_id is None or filters.inspection_id == record.inspection_id)
         and (filters.mode == "all" or filters.mode == result.provenance.mode)
+        and (filters.modality is None or filters.modality == result.modality)
+        and (not isinstance(filters, StatisticsFilter) or filters.mode != "real"
+             or result.multimodal is None or result.multimodal.weight_status == "trusted_trained")
         and (filters.model_id is None or filters.model_id == record.model_id)
         and (filters.model is None or filters.model == result.provenance.model)
         and (filters.defect_class is None or any(d.class_name == filters.defect_class for d in result.detections))

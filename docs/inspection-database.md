@@ -25,12 +25,19 @@ The API stores sanitized source identifiers and checkpoint fingerprints. Use non
 
 Input streams use stable UUIDs in the existing insert-only key. Restarting an unchanged replay can reuse a retained record even while retention hides it from history. An explicitly purged record no longer provides evidence for deduplication. [Replay recovery](input-streaming.md#queue-recovery-and-status)
 
+Product inspection records store the version 1 `multimodal` block in the existing
+record JSON. SQLite needs no migration. The modality filter reads submitted
+evidence from JSON. A legacy record with an image descriptor matches image mode.
+The detection table continues to store only spatial detections. Production
+statistics exclude simulated, untrained, and unavailable product records.
+
 ## Browse and export
 
 See the [API filter and response contracts](rest-api.md#history-filters-and-statistics) for the full filter list. The CLI takes shared filters before the subcommand.
 
 ```text
 ict history --mode real --model-id line-3 list --limit 50 --offset 0
+ict history --modality paired list --limit 50
 ict history --mode mock --defect-class cold_solder --order oldest export outputs/mock-history --format csv
 ict history --created-from 2026-01-01T00:00:00Z export outputs/january-history --format json
 ```

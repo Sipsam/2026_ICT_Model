@@ -11,6 +11,7 @@ from pydantic import UUID4
 from starlette.concurrency import run_in_threadpool
 
 from ..streaming.runner import StreamRunner, StreamStatus
+from ..multimodal.contracts import CHANNELS, UNITS
 from .errors import APIError, ERRORS
 from .history import (
     DefectStatistics,
@@ -24,7 +25,9 @@ from .history import (
 )
 from .history_export import write_history
 from .inspection_images import original_image
-from .schemas import BatchDetails, BatchResponse, ErrorResponse, Health, ModelsResponse, SingleDetails, StoredInspection
+from .schemas import (
+    BatchDetails, BatchResponse, ErrorResponse, Health, ModelsResponse, ProductDetails, SingleDetails, StoredInspection,
+)
 from .services import InspectionAPI, Upload
 from .uploads import read_form, read_image, split_form
 
@@ -52,13 +55,21 @@ UPLOAD_ERRORS = _errors(400, 404, 408, 413, 415, 422, 503, 504)
 HISTORY_ERRORS = {**AUTH_ERRORS, **_errors(422, 503)}
 
 
-def _multipart_schema(*, batch: bool) -> dict[str, Any]:
+def _multipart_schema(*, batch: bool = False, product: bool = False) -> dict[str, Any]:
     field = "images" if batch else "image"
     binary = {"type": "string", "format": "binary"}
     details = {"model_id": "mock-defect"}
     details.update({"items": [DETAILS_EXAMPLE]} if batch else DETAILS_EXAMPLE)
+    if product:
+        timestamp = "2026-01-01T00:00:00Z"
+        details = {"model_id": "product-fixture", "request_id": "request-1", "source_id": "station-1",
+                   "sample_id": "part-1", "capture_timestamp": timestamp,
+                   "sensor_evidence": {"source_id": "sensor-1", "sequence": {
+                       "channels": CHANNELS, "units": UNITS,
+                       "steps": [{"timestamp": timestamp, "values": [23, None, None, None, None]}],
+                   }}}
     return {"requestBody": {"required": True, "content": {"multipart/form-data": {
-        "schema": {"type": "object", "required": [field, "details"], "properties": {
+        "schema": {"type": "object", "required": ["details"] if product else [field, "details"], "properties": {
             field: {"type": "array", "items": binary} if batch else binary,
             "details": {"type": "string", "description": "Version 1 metadata encoded as JSON.",
                         "examples": [json.dumps(details)]},
@@ -115,6 +126,28 @@ async def inspect_image(request: Request, response: Response) -> StoredInspectio
     finally:
         await form.close()
     (result,) = await api.inspect(details.model_id, [upload])
+    if result.inspection is None:
+        assert result.error is not None
+        raise APIError(result.error.code)
+    response.headers["Location"] = f"/v1/inspections/{result.inspection.inspection_id}"
+    return result.inspection
+
+
+@router.post("/v1/inspections/multimodal", status_code=201, responses={**AUTH_ERRORS, **UPLOAD_ERRORS},
+             openapi_extra=_multipart_schema(product=True))
+async def inspect_product(request: Request, response: Response) -> StoredInspection:
+    api = _api(request)
+    form = await read_form(request, api.settings, 1)
+    try:
+        metadata, files = split_form(form, "image", optional_file=True)
+        try:
+            details = ProductDetails.model_validate_json(metadata)
+        except ValueError:
+            raise APIError("invalid_request") from None
+        upload = await read_image(files[0], details, api.settings) if files else Upload(details, None, None)
+    finally:
+        await form.close()
+    (result,) = await api.inspect(details.model_id, [upload], product=True)
     if result.inspection is None:
         assert result.error is not None
         raise APIError(result.error.code)

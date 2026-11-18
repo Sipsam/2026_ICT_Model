@@ -100,6 +100,11 @@ sequences. A chosen raw step can populate `SensorObservation.values` using the
 same five channel names, units, and nullable values. A decision-window tensor
 uses separately frozen Train preprocessing. [Offline sequence and dataset contracts](multimodal-data.md)
 
+The replay runner uses sensor observations as inspection metadata. For product
+scoring from a verified export, submit an ordered capture-time sequence through
+the product CLI or REST route with a trusted pairing receipt for paired inputs.
+[Product inspection](multimodal-inference.md)
+
 ## Alignment and missing input
 
 - The matcher checks the shared `sample_id` first. If it has no match, a shared `production_id` can identify the same item when it is unique and the known identifiers agree. Use a per-item production identifier. Lot IDs and session IDs describe groups and are unsuitable for an item join.

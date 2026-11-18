@@ -7,7 +7,7 @@ from ..data.preprocessing.common import require_separate_output
 from ..data.preprocessing.console import protect_source_data
 from ..streaming.settings import DirectorySettings
 from .repository import FileInspectionRepository
-from .settings import APISettings, TrustedModel
+from .settings import APISettings, ProductModel, TrustedModel
 from .sqlite_repository import SQLiteInspectionRepository
 
 
@@ -15,7 +15,9 @@ def storage_root(settings: APISettings, credentials: Credentials) -> Path:
     root = settings.storage_root.resolve()
     credentials.protect_path(str(root), "inspection storage")
     protect_source_data(root, Path.cwd())
-    if settings.storage_backend == "sqlite" or any(isinstance(spec, TrustedModel) for spec in settings.models.values()):
+    if settings.storage_backend == "sqlite" or any(
+        isinstance(spec, (TrustedModel, ProductModel)) for spec in settings.models.values()
+    ):
         require_separate_output(settings.model_root, root)
     if settings.input_stream is not None and isinstance(settings.input_stream.camera, DirectorySettings):
         require_separate_output(settings.input_stream.camera.directory, root)

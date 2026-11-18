@@ -5,12 +5,12 @@ from typing import Literal, Self
 from pydantic import Field, model_validator
 
 from ..data.preprocessing.policy import NAMES
-from ..inspection.contracts import Contract, SchemaVersion
+from ..inspection.contracts import Contract, Modality, ProductTargetPolicy, SchemaVersion
 from ..pipeline.store import Fingerprint, digest_json
 from .contracts import CHANNELS, Channels
 
-TargetPolicy = Literal["smt-target-defect-presence-v1", "smt-view-class-presence-v1"]
-Branch = Literal["image", "sensor", "paired"]
+TargetPolicy = ProductTargetPolicy
+Branch = Modality
 TrainingStatus = Literal["untrained", "trained"]
 CLASS_NAMES = tuple(NAMES)
 

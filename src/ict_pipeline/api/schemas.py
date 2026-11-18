@@ -1,11 +1,12 @@
 """Versioned HTTP envelopes around the shared inspection contracts."""
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import AwareDatetime, UUID4
+from pydantic import AwareDatetime, ConfigDict, SerializerFunctionWrapHandler, UUID4, model_serializer
 
 from ..inspection.contracts import Contract, InspectionInput, InspectionResult, MockScenario, SchemaVersion
 from ..models.contracts import ModelName
+from ..multimodal.inference_contracts import ProductInspectionInput
 from .settings import ModelID
 
 
@@ -14,11 +15,21 @@ class Health(Contract):
 
 
 class AvailableModel(Contract):
+    model_config = ConfigDict(json_schema_mode_override="validation")
+
     model_id: ModelID
     mode: Literal["mock", "real"]
     model: ModelName | None = None
     mock_scenario: MockScenario | None = None
     available: bool
+    input_kind: Literal["multimodal"] | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_model(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data = handler(self)
+        if self.input_kind is None:
+            data.pop("input_kind", None)
+        return data
 
 
 class ModelsResponse(Contract):
@@ -26,6 +37,10 @@ class ModelsResponse(Contract):
 
 
 class SingleDetails(InspectionInput):
+    model_id: ModelID
+
+
+class ProductDetails(ProductInspectionInput):
     model_id: ModelID
 
 

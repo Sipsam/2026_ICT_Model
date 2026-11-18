@@ -98,6 +98,12 @@ and date tokens are incomplete proxies for real session provenance.
 
 ## Fit and reuse sensor preprocessing
 
+For capture-time product inspection, fit a state with
+`window_policy="at-or-before-capture-v1"` and the intended lookback in
+`window_seconds`, or use an existing zero-second state. Fit on eligible Train
+records and bind the resulting fingerprint to the product architecture.
+[Capture-time checkpoint requirements](multimodal-inference.md#load-a-local-checkpoint)
+
 ```python
 from pathlib import Path
 

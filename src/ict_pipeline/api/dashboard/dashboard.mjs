@@ -1,6 +1,6 @@
 import {
   APIError, CLASSES, STATUSES, api, buildFilters, dailySeries, defaultDateRange,
-  detectionRows, imageSize, inspectionRecord, isCount, json, pageParams, requirePayload,
+  detectionRows, imageSize, inspectionRecord, isCount, json, pageParams, productEvidence, requirePayload,
 } from "./client.mjs";
 
 const byId = id => document.getElementById(id);
@@ -179,7 +179,8 @@ function historyRow(record) {
   status.append(statusBadge(result.outcome), element("span", result.reason, "muted"));
   const model = element("td", record.model_id);
   if (result.provenance.mode === "mock") model.append(element("span", "Simulated", "muted"));
-  else model.append(element("span", result.provenance.model ?? "—", "muted"));
+  else model.append(element("span", result.multimodal ? productEvidence(result.multimodal).status :
+    result.provenance.model ?? "—", "muted"));
   const details = element("td");
   const open = element("button", "View", "record-button");
   open.type = "button";
@@ -348,6 +349,28 @@ function recordFacts(record) {
   ]);
 }
 
+function renderProduct(product) {
+  const panel = element("section");
+  const view = productEvidence(product);
+  panel.append(element("h3", "Product prediction"), facts([
+    ["Sample ID", product.sample_id], ["Input", view.input], ["Scored branch", view.branch],
+    ["Image", product.input_mode === "sensor" ? "Absent" : "Available"],
+    ["Sensor", view.sensor], ["Prediction status", view.status], ["Alignment", view.alignment],
+    ["Capture time", product.capture_timestamp], ["Pairing fingerprint", product.pairing_fingerprint],
+    ["Sensor fingerprint", product.sensor_fingerprint], ["Threshold", product.threshold],
+  ]));
+  if (view.scores.length) {
+    const list = element("ul");
+    for (const row of view.scores) {
+      list.append(element("li", `${row.name} ${row.score.toFixed(4)}${row.threshold_crossed ? " (threshold crossed)" : ""}`));
+    }
+    panel.append(element("h4", view.scoreLabel), list);
+  } else {
+    panel.append(element("p", "No usable product scores.", "muted"));
+  }
+  return panel;
+}
+
 const detectionLabel = row => row.name + " · " + (row.confidence * 100).toFixed(1) + "%";
 
 function renderImage(container, url, image, rows, boxes) {
@@ -447,7 +470,8 @@ async function openDetail(id, trigger) {
     raw.addEventListener("toggle", () => {
       if (raw.open && raw.children.length === 1) raw.append(element("pre", JSON.stringify(record, null, 2)));
     });
-    detailContent.replaceChildren(heading, media, detectionPanel, recordFacts(record), raw);
+    const productPanels = result.multimodal ? [renderProduct(result.multimodal)] : [];
+    detailContent.replaceChildren(heading, ...productPanels, media, detectionPanel, recordFacts(record), raw);
     if (!imageSize(result.image)) {
       media.append(element("p", "No original image is recorded for this inspection.", "notice"));
       return;

@@ -11,6 +11,7 @@ from ..data.preprocessing.common import safe_component
 from ..inspection.contracts import CheckpointKind, Contract, Device, InspectionThresholds, MockScenario
 from ..inspection.service import MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS
 from ..models.contracts import ModelName
+from ..multimodal.inference_contracts import CheckpointProductModel, ProductModelSpec
 from ..pipeline.store import Fingerprint
 from ..streaming.settings import StreamSettings
 
@@ -42,7 +43,19 @@ class TrustedModel(Contract):
         return self
 
 
-ModelSpec = Annotated[MockModel | TrustedModel, Field(discriminator="mode")]
+class ProductModel(Contract):
+    mode: Literal["multimodal"]
+    product: ProductModelSpec
+    detector: TrustedModel | None = None
+
+    @model_validator(mode="after")
+    def check_detector(self) -> Self:
+        if self.detector is not None and not isinstance(self.product, CheckpointProductModel):
+            raise ValueError("Only a product checkpoint may use a trusted detector.")
+        return self
+
+
+ModelSpec = Annotated[MockModel | TrustedModel | ProductModel, Field(discriminator="mode")]
 
 
 class APISettings(Contract):
@@ -72,7 +85,13 @@ class APISettings(Contract):
 
     @model_validator(mode="after")
     def bound_models(self) -> Self:
-        if sum(isinstance(model, TrustedModel) for model in self.models.values()) > self.max_loaded_models:
+        loaded = sum(
+            1 if isinstance(model, TrustedModel) else
+            int(isinstance(model.product, CheckpointProductModel)) + int(model.detector is not None)
+            if isinstance(model, ProductModel) else 0
+            for model in self.models.values()
+        )
+        if loaded > self.max_loaded_models:
             raise ValueError("Real models exceed the configured startup capacity.")
         if not self.host or not self.host.isascii() or any(c.isspace() for c in self.host):
             raise ValueError("Supply a valid bind host.")

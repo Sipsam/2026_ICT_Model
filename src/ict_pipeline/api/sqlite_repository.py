@@ -187,6 +187,11 @@ class SQLiteInspectionRepository:
     def _where(self, filters: HistoryFilter) -> tuple[str, tuple[str, ...]]:
         clauses, params = [], []
         cutoff = retention_cutoff(self.retention_seconds)
+        if isinstance(filters, StatisticsFilter) and filters.mode == "real":
+            clauses.append(
+                "COALESCE(json_extract(i.record_json, '$.result.multimodal.weight_status'), 'trusted_trained')"
+                " = 'trusted_trained'"
+            )
         for clause, value in (
             ("i.created_at > ?", utc_timestamp(cutoff) if cutoff is not None else None),
             ("i.created_at >= ?", utc_timestamp(filters.created_from) if filters.created_from is not None else None),
@@ -194,6 +199,9 @@ class SQLiteInspectionRepository:
             ("i.status = ?", filters.status),
             ("i.inspection_id = ?", filters.inspection_id.hex if filters.inspection_id is not None else None),
             ("i.mode = ?", filters.mode if filters.mode != "all" else None),
+            ("""COALESCE(json_extract(i.record_json, '$.result.multimodal.input_mode'),
+                 CASE WHEN json_type(i.record_json, '$.result.image') = 'object' THEN 'image' END) = ?""",
+             filters.modality),
             ("i.model_id = ?", filters.model_id),
             ("i.detector_model = ?", filters.model),
             ("i.inspection_id IN (SELECT inspection_id FROM detections WHERE class_name = ?)", filters.defect_class),

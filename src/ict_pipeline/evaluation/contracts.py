@@ -1,7 +1,7 @@
 """Detector-independent predictions and evaluation settings."""
 
 import math
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal, Protocol
@@ -63,6 +63,29 @@ class Predictor(Protocol):
     def predict(self, sample: Sample) -> Prediction: ...
 
     def synchronize(self) -> None: ...
+
+
+def validate_predictions(samples: tuple[Sample, ...], predictions: Mapping[str, Prediction]) -> None:
+    ids = {sample.image.stem for sample in samples}
+    if len(ids) != len(samples) or predictions.keys() != ids:
+        raise EvaluationError("Predictions must cover every Validation sample exactly once.")
+    for sample in samples:
+        pred = predictions[sample.image.stem]
+        if (
+            pred.sample_id != sample.image.stem
+            or pred.preprocessing.original_size != (sample.width, sample.height)
+            or min(pred.preprocessing.input_size) < 1
+            or len(pred.boxes) != len(pred.class_ids) or len(pred.boxes) != len(pred.confidence_scores)
+        ):
+            raise EvaluationError("Prediction rows or preprocessing metadata do not match their Validation sample.")
+        for box, category, score in zip(pred.boxes, pred.class_ids, pred.confidence_scores, strict=True):
+            x1, y1, x2, y2 = box
+            if (
+                type(category) is not int or category not in CLASSES or not 0 <= score <= 1
+                or not all(math.isfinite(value) for value in box)
+                or not (0 <= x1 < x2 <= sample.width and 0 <= y1 < y2 <= sample.height)
+            ):
+                raise EvaluationError("Predictions contain an invalid box, class or confidence score.")
 
 
 def xywh_to_xyxy(box: Box) -> Box:

@@ -10,8 +10,7 @@ from pydantic import Field, model_validator
 from ..classification.sensors import parse_timestamp, reading
 from ..data.preprocessing.audit import XLSX_FIELDS
 from ..data.preprocessing.policy import SENSOR_FIELDS
-from ..inspection.contracts import Contract, Identifier, SensorInput
-from ..inspection.service import MAX_IMAGE_BYTES
+from ..inspection.contracts import MAX_IMAGE_BYTES, Contract, Identifier, SensorInput
 
 PublicID = Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")]
 ImageKind = Literal["directory", "usb", "rtsp", "custom"]

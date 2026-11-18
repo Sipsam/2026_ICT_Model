@@ -18,9 +18,10 @@ The [inspection dashboard](inspection-dashboard.md) is available at `http://127.
 | Method and path | Successful response |
 | --- | --- |
 | `GET /health` | `200` with `status: ok` when all configured models loaded, or `status: degraded` when some loaded. If none loaded, the API returns `503 model_unavailable`. |
-| `GET /v1/models` | `200` with model IDs, mock or real mode, the mock scenario or detector family, and availability. |
+| `GET /v1/models` | `200` with model IDs, mode, availability, and the input kind for product models. |
 | `GET /v1/sources/status` | `200` with the process-local input stream status, source health, and bounded queue metrics. The state is `disabled` when no stream is configured. |
 | `POST /v1/inspections` | `201` with a stored result and a relative `Location` header. |
+| `POST /v1/inspections/multimodal` | `201` with a stored product result and a relative `Location` header. |
 | `POST /v1/inspections/batch` | `200` with one item per upload, in upload order, including per-item status and a stored inspection or error. |
 | `GET /v1/inspections/{inspection_id}` | `200` with the stored result for a server-issued UUID. |
 | `GET /v1/inspections/{inspection_id}/image` | `200` with the original JPEG or PNG bytes when a matching original is staged under the configured `image_root`. |
@@ -30,7 +31,7 @@ The [inspection dashboard](inspection-dashboard.md) is available at `http://127.
 | `GET /v1/statistics/defects` | `200` with inspection and detection counts grouped by defect class. |
 | `GET /v1/statistics/trends` | `200` with inspection counts grouped by UTC day. |
 
-Send a `multipart/form-data` body with a text field named `details` containing JSON. Send one `image` file field for a single inspection or repeat `images` in upload order for a batch. Set each file part's MIME type to `image/jpeg` or `image/png`. The server verifies the declared MIME against the decoded format and accepts only single-frame images. The filename is ignored, and coordinates refer to the encoded image grid.
+Send a `multipart/form-data` body with a text field named `details` containing JSON. Send one `image` file field for an image inspection or repeat `images` in upload order for a batch. Product requests use the same image part when an image is available. Set each file part's MIME type to `image/jpeg` or `image/png`. The server verifies the declared MIME against the decoded format and accepts only single-frame images. The filename is ignored, and coordinates refer to the encoded image grid.
 
 A single request uses this `details` object.
 
@@ -63,6 +64,13 @@ A batch selects one model for all images. Each item supplies the same image meta
 The batch validates the whole metadata object and requires one metadata item per file. The response has `schema_version: 1` and `items`. Each item has a zero-based `index`, an HTTP-style `status`, and either `inspection` or `error`, with the other field set to null. Per-item failures allow other items to finish and be stored. A request-level rejection or processing timeout produces a top-level HTTP error. A timed-out batch publishes no inspection records.
 
 ## Results and errors
+
+Product requests use `POST /v1/inspections/multimodal` with a configured product
+`model_id` and multipart `details`. The `image` part is optional for
+sensor-only requests. The version 1 stored inspection includes
+`result.multimodal` when product evidence is present. Existing image requests and
+responses keep their original shape.
+[Product REST configuration and request examples](multimodal-inference.md#serve-product-inspections)
 
 A stored inspection includes `schema_version`, `inspection_id`, UTC `created_at`, `model_id`, and the shared versioned `result`. `result.detections` carries canonical class IDs and names, original AI Hub category IDs, confidence, and `bbox_xyxy` in absolute pixels. Mock results always carry `provenance.mode: "mock"` and a scenario, with `outcome: "review_required"` and `reason: "simulated_prediction"`. A real prediction with retained detections returns `defect_detected`. An empty real prediction requires review. The HTTP service never issues a `pass` decision.
 
@@ -119,6 +127,11 @@ curl -o history.csv 'http://127.0.0.1:8000/v1/inspections/export?mode=mock&forma
 ```
 
 ## History filters and statistics
+
+History, exports, and statistics also accept `modality=image|sensor|paired`.
+This filters submitted evidence, including verified pairs scored via the image
+fallback. Legacy records with an image descriptor match `image`. Production
+statistics exclude simulated, untrained, and unavailable product predictions.
 
 All history and statistics routes accept these filters. Combine them to narrow the set of inspections.
 

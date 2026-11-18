@@ -97,11 +97,12 @@ async def read_form(request: Request, settings: APISettings, max_files: int) -> 
     return form
 
 
-def split_form(form: FormData, file_field: str) -> tuple[str, list[UploadFile]]:
+def split_form(form: FormData, file_field: str, *, optional_file: bool = False) -> tuple[str, list[UploadFile]]:
     details = form.get("details")
     files = form.getlist(file_field)
-    if (set(form) != {"details", file_field} or not isinstance(details, str)
-            or not files or any(not isinstance(file, UploadFile) for file in files)):
+    fields = {"details", file_field} if files or not optional_file else {"details"}
+    if (set(form) != fields or not isinstance(details, str)
+            or any(not isinstance(file, UploadFile) for file in files)):
         raise APIError("malformed_request")
     return details, files
 

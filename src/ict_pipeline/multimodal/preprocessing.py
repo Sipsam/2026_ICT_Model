@@ -5,9 +5,9 @@ import math
 from datetime import timedelta
 from pathlib import Path
 from statistics import fmean, median, pstdev, quantiles
-from typing import Annotated, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
 from ..classification.sensors import parse_timestamp
 from ..inspection.contracts import Contract, SchemaVersion
@@ -19,6 +19,7 @@ WindowValue = Annotated[float, Field(ge=-1e150, le=1e150)]
 FloatRow = tuple[WindowValue, WindowValue, WindowValue, WindowValue, WindowValue]
 MaskRow = tuple[bool, bool, bool, bool, bool]
 WINDOW_POLICY = "capture-through-decision-v1"
+CAUSAL_WINDOW_POLICY = "at-or-before-capture-v1"
 
 
 class PreprocessingConfig(Contract):
@@ -27,6 +28,14 @@ class PreprocessingConfig(Contract):
     scaling: Literal["none", "standard", "robust"] = "none"
     normalization: Literal["none", "l2"] = "none"
     window_seconds: int = Field(default=0, ge=0, le=86400)
+    window_policy: Literal["capture-through-decision-v1", "at-or-before-capture-v1"] = WINDOW_POLICY
+
+    @model_serializer(mode="wrap")
+    def serialize_config(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data = handler(self)
+        if self.window_policy == WINDOW_POLICY:
+            data.pop("window_policy", None)
+        return data
 
     @model_validator(mode="after")
     def check_units(self) -> Self:
@@ -36,7 +45,7 @@ class PreprocessingConfig(Contract):
 
     @property
     def fingerprint(self) -> str:
-        return digest_json([WINDOW_POLICY, CHANNELS, UNITS, self.model_dump(mode="json")])
+        return digest_json([self.window_policy, CHANNELS, UNITS, self.model_dump(mode="json")])
 
 
 class ChannelFit(Contract):
@@ -85,6 +94,8 @@ class PreprocessingState(Contract):
         if digest_json(saved["state"]) != saved["fingerprint"]:
             raise ValueError("Sensor preprocessing state fingerprint mismatch.")
         state = cls.model_validate_json(json.dumps(saved["state"]))
+        if state.fingerprint != saved["fingerprint"]:
+            raise ValueError("Sensor preprocessing state is not canonical.")
         if expected_config is not None and expected_config.fingerprint != state.config_fingerprint:
             raise ValueError("Sensor preprocessing configuration fingerprint mismatch.")
         if expected_training_fingerprint is not None and state.training_fingerprint != expected_training_fingerprint:
@@ -120,6 +131,8 @@ def _window(sequence: SensorSequence, capture_timestamp: str, config: Preprocess
     if (capture.tzinfo is None) != (sequence.steps[0].instant.tzinfo is None):
         raise ValueError("Sensor timestamps and capture require comparable clocks.")
     horizon = timedelta(seconds=config.window_seconds)
+    if config.window_policy == CAUSAL_WINDOW_POLICY:
+        return tuple(step for step in sequence.steps if timedelta(0) <= capture - step.instant <= horizon)
     return tuple(step for step in sequence.steps if timedelta(0) <= step.instant - capture <= horizon)
 
 

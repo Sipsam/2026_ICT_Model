@@ -1,7 +1,6 @@
 """Detection stage adapters over the standalone model and reporting APIs."""
 
 import json
-import math
 import platform
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
@@ -18,7 +17,7 @@ from ..config.settings import Credentials, SetupError
 from ..data.preprocessing.policy import label_policy
 from ..data.stages import limited_progress
 from ..evaluation import runner as evaluation
-from ..evaluation.contracts import CLASSES, EvaluationConfig, EvaluationError, EvaluationSplit, Prediction
+from ..evaluation.contracts import EvaluationConfig, EvaluationError, EvaluationSplit, Prediction, validate_predictions
 from ..evaluation.metrics import detection_metrics
 from ..models.contracts import ModelName, Progress, TrainConfig, TrainingError
 from ..models.dataset import Split, inspect_data
@@ -251,7 +250,7 @@ class DetectionStages:
             predictions, inference = evaluation.benchmark_checkpoint(
                 checkpoint, labels, self.config, self._progress(context), scratch,
             )
-            _validate_predictions(labels, predictions)
+            validate_predictions(labels.samples, predictions)
             result = {
                 "schema_version": 1, "status": "completed", "model_index": index,
                 **evaluation.checkpoint_record(checkpoint, "best"),
@@ -286,7 +285,7 @@ class DetectionStages:
             if any(digest_json(result.get(key)) != digest_json(value) for key, value in expected.items()):
                 raise StageFailure("Validation predictions do not match the dataset, checkpoint or evaluation protocol.")
             predictions = _PREDICTIONS.validate_json(json.dumps(result.pop("predictions")), strict=True)
-            _validate_predictions(labels, predictions)
+            validate_predictions(labels.samples, predictions)
             result.update(
                 finished_at=timestamp(), request_fingerprint=identity,
                 prediction_fingerprint=fingerprint_path(path),
@@ -345,25 +344,3 @@ class DetectionStages:
     def _progress(context: StageContext) -> Progress:
         update = limited_progress(context.progress)
         return lambda _stage, done, total: update(done, total)
-
-
-def _validate_predictions(labels: Split, predictions: dict[str, Prediction]) -> None:
-    if predictions.keys() != {sample.image.stem for sample in labels.samples}:
-        raise EvaluationError("Predictions must cover every Validation sample exactly once.")
-    for sample in labels.samples:
-        pred = predictions[sample.image.stem]
-        if (
-            pred.sample_id != sample.image.stem
-            or pred.preprocessing.original_size != (sample.width, sample.height)
-            or min(pred.preprocessing.input_size) < 1
-            or len(pred.boxes) != len(pred.class_ids) or len(pred.boxes) != len(pred.confidence_scores)
-        ):
-            raise EvaluationError("Prediction rows or preprocessing metadata do not match their Validation sample.")
-        for box, category, score in zip(pred.boxes, pred.class_ids, pred.confidence_scores, strict=True):
-            x1, y1, x2, y2 = box
-            if (
-                type(category) is not int or category not in CLASSES or not 0 <= score <= 1
-                or not all(math.isfinite(value) for value in box)
-                or not (0 <= x1 < x2 <= sample.width and 0 <= y1 < y2 <= sample.height)
-            ):
-                raise EvaluationError("Predictions contain an invalid box, class or confidence score.")

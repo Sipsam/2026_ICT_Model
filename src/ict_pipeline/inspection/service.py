@@ -19,15 +19,16 @@ from ..evaluation.metrics import box_iou
 from ..evaluation.runner import inspect_checkpoint
 from ..models.contracts import ModelName
 from ..models.dataset import Sample
+from ..multimodal.inference import MultimodalInference, ProductInputError
+from ..multimodal.inference_contracts import MockProductModel, ProductInspectionInput, ProductModelSpec
 from ..pipeline.store import fingerprint_path
 from .contracts import (
-    CheckpointKind, Detection, Device, Failure, ImageSource, InspectionError, InspectionInput, InspectionInterrupted,
+    MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, CheckpointKind, Detection, Device, Failure, ImageSource, InspectionError,
+    InspectionInput, InspectionInterrupted,
     InspectionMetadataInput, InspectionRequest,
     InspectionResult, InspectionThresholds, MockScenario, ModelProvenance, TransientInspectionError,
 )
 
-MAX_IMAGE_BYTES = 64 * 1024**2
-MAX_IMAGE_PIXELS = 25_000_000
 SOURCE_IDS = {name: category for category, name in TARGET_IDS.items()}
 # The shared loader and adapter diagnostics use process-wide streams.
 _BACKEND_LOCK = Lock()
@@ -168,13 +169,38 @@ def _detections(
 
 class InspectionService:
     def __init__(
-        self, predictor: InspectionPredictor, provenance: ModelProvenance,
-        thresholds: InspectionThresholds, credentials: Credentials,
+        self, predictor: InspectionPredictor | None, provenance: ModelProvenance,
+        thresholds: InspectionThresholds, credentials: Credentials, *,
+        product: MultimodalInference | None = None,
     ) -> None:
         self._predictor = predictor
         self.provenance = provenance
         self.thresholds = thresholds
         self.credentials = credentials
+        self._product = product
+
+    @classmethod
+    def from_product(
+        cls, spec: ProductModelSpec, root: Path, *, credentials: Credentials,
+        detector: "InspectionService | None" = None, scratch_root: Path | None = None,
+    ) -> "InspectionService":
+        simulated = isinstance(spec, MockProductModel)
+        if detector is not None and (simulated or detector.provenance.model is None):
+            raise InspectionError("Product checkpoint inference may use a trusted detector for spatial evidence.")
+        # The Faster R-CNN feature encoder copies its transform and backbone. Other detectors
+        # remain independent sources of spatial evidence.
+        fpn = (getattr(detector._predictor, "model", None)
+               if detector is not None and detector.provenance.model == ModelName.FASTER_RCNN else None)
+        with _BACKEND_LOCK, redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            product = MultimodalInference.load(spec, root, credentials=credentials, detector=fpn,
+                                               scratch_root=scratch_root)
+        return cls(
+            detector._predictor if detector is not None else None,
+            detector.provenance if detector is not None else (
+                ModelProvenance(mode="mock", mock_scenario="empty") if simulated
+                else ModelProvenance(mode="real", product_only=True)
+            ), detector.thresholds if detector is not None else InspectionThresholds(), credentials, product=product,
+        )
 
     @classmethod
     def mock(
@@ -282,12 +308,94 @@ class InspectionService:
         return self._predict_image(request, image, data, context, scratch_root=scratch_root,
                                    propagate_transient=propagate_transient, cancelled=cancelled)
 
+    def inspect_product(
+        self, request: ProductInspectionInput, image_path: Path | None = None,
+    ) -> InspectionResult:
+        context = self._product_context(request)
+        image = data = None
+        if image_path is not None:
+            try:
+                image, data = _read_image(local_path(image_path, Path.cwd(), self.credentials))
+            except ImageError as exc:
+                return InspectionResult(outcome="inference_failed", reason=exc.reason, **context)
+            except (InspectionError, SetupError, OSError, ValueError, RuntimeError):
+                return InspectionResult(outcome="inference_failed", reason="invalid_request", **context)
+        return self._predict_product(request, image, data, context)
+
+    def inspect_product_bytes(
+        self, request: ProductInspectionInput, data: bytes | None, *, image_format: Literal["JPEG", "PNG"] | None,
+        max_width: int, max_height: int, max_pixels: int, scratch_root: Path | None = None,
+        cancelled: Event | None = None,
+    ) -> InspectionResult:
+        context = self._product_context(request)
+        image = None
+        if data is not None:
+            try:
+                if len(data) > MAX_IMAGE_BYTES:
+                    raise ImageError("invalid_image")
+                image = _decode_image(data, expected_format=image_format, max_width=max_width,
+                                      max_height=max_height, max_pixels=max_pixels)
+            except ImageError as exc:
+                return InspectionResult(outcome="inference_failed", reason=exc.reason, **context)
+        return self._predict_product(request, image, data, context, scratch_root=scratch_root, cancelled=cancelled)
+
+    def _product_context(self, request: ProductInspectionInput) -> dict[str, object]:
+        context = self._context(request, None)
+        if request.sensor_evidence is not None:
+            context["sensor_source_id"] = self.credentials.redact_text(request.sensor_evidence.source_id)
+        return context
+
+    def _predict_product(
+        self, request: ProductInspectionInput, image: ImageSource | None, data: bytes | None,
+        context: dict[str, object], *, scratch_root: Path | None = None, cancelled: Event | None = None,
+    ) -> InspectionResult:
+        context["image"] = image
+        if self._product is None:
+            return InspectionResult(outcome="inference_failed", reason="invalid_request", **context)
+        if image is not None and request.expected_size and (
+            image.width, image.height
+        ) != (request.expected_size.width, request.expected_size.height):
+            return InspectionResult(outcome="inference_failed", reason="dimension_mismatch", **context)
+        try:
+            with _use_backend(cancelled), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                product = self._product.predict(request, image, data, self.credentials)
+                detections = ()
+                if cancelled is not None and cancelled.is_set():
+                    raise InspectionInterrupted("Inspection was cancelled before detection.")
+                if image is not None and data is not None and self._predictor is not None:
+                    detections = self._run_detector(image, data, scratch_root)
+        except ProductInputError:
+            return InspectionResult(outcome="inference_failed", reason="invalid_request", **context)
+        except InspectionInterrupted:
+            if cancelled is not None and cancelled.is_set():
+                raise
+            return InspectionResult(outcome="inference_failed", reason="prediction_failed", **context)
+        except Exception:
+            return InspectionResult(outcome="inference_failed", reason="prediction_failed", **context)
+        reason = ("simulated_prediction" if self.provenance.mode == "mock" else
+                  "product_review" if product.branch else "product_unavailable")
+        return InspectionResult(outcome="review_required", reason=reason, detections=detections,
+                                multimodal=product, **context)
+
+    def _run_detector(self, image: ImageSource, data: bytes, scratch_root: Path | None) -> tuple[Detection, ...]:
+        assert self._predictor is not None
+        with TemporaryDirectory(prefix="ict-inspect-image-", dir=scratch_root) as directory:
+            extension = "jpg" if image.format == "JPEG" else "png"
+            snapshot = Path(directory) / f"image.{extension}"
+            snapshot.write_bytes(data)
+            sample = Sample(snapshot, image.width, image.height, ())
+            prediction = self._predictor.predict(sample)
+            self._predictor.synchronize()
+        return _detections(prediction, sample, self.thresholds)
+
     def _predict_image(
         self, request: InspectionInput, image: ImageSource, data: bytes, context: dict[str, object],
         *, reuse: Callable[[ImageSource], InspectionResult | None] | None = None,
         scratch_root: Path | None = None, propagate_transient: bool = False, cancelled: Event | None = None,
     ) -> InspectionResult:
         context["image"] = image
+        if self._predictor is None:
+            return InspectionResult(outcome="inference_failed", reason="invalid_request", **context)
         if request.expected_size and (image.width, image.height) != (request.expected_size.width, request.expected_size.height):
             return InspectionResult(outcome="inference_failed", reason="dimension_mismatch", **context)
         if reuse is not None:
@@ -296,15 +404,8 @@ class InspectionService:
                     and all(getattr(cached, key) == value for key, value in context.items())):
                 return cached
         try:
-            with TemporaryDirectory(prefix="ict-inspect-image-", dir=scratch_root) as directory:
-                extension = "jpg" if image.format == "JPEG" else "png"
-                snapshot = Path(directory) / f"image.{extension}"
-                snapshot.write_bytes(data)
-                sample = Sample(snapshot, image.width, image.height, ())
-                with _use_backend(cancelled), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-                    prediction = self._predictor.predict(sample)
-                    self._predictor.synchronize()
-                detections = _detections(prediction, sample, self.thresholds)
+            with _use_backend(cancelled), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                detections = self._run_detector(image, data, scratch_root)
         except InspectionInterrupted:
             if cancelled is not None and cancelled.is_set():
                 raise

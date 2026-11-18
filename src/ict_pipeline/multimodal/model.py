@@ -11,6 +11,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from ..evaluation.contracts import CLASSES, Prediction
+from ..inspection.contracts import SensorStatus
 from ..pipeline.store import digest_json
 from .contracts import Split
 from .dataset import Batch, DatasetSample, collate
@@ -21,8 +22,6 @@ from .encoders import (
 from .fusion import ConcatenationFusion, GatedFusion, LateFusion
 from .model_config import ArchitectureConfig, Branch, TargetPolicy, TrainingStatus, WeightStatus
 from .preprocessing import PreprocessingState, SensorWindow
-
-SensorStatus = Literal["absent", "no_observations", "insufficient_steps", "available"]
 
 
 @dataclass(frozen=True)

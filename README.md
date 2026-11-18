@@ -230,6 +230,12 @@ The history commands work without starting inference. See the [inspection databa
 
 Set `input_stream` in the JSON file selected by `ICT_API_CONFIG` to run an image-directory replay with an optional CSV or JSON sensor snapshot. Select a mock model to test ordering, sample alignment, backpressure, and persistence on CPU. The stream writes to the same inspection history as HTTP uploads, and rerunning the same replay skips committed records. Use **Input sources → Check source status** in the dashboard or query `GET /v1/sources/status`. Streaming defaults to disabled. USB and RTSP require explicit device settings and an existing OpenCV installation. [Replay example, alignment rules, and device limits](docs/input-streaming.md)
 
+## Inspect products with images or sensors
+
+Use `ict inspect --product-model product.json --product-request request.json` for a sensor-only product inspection. Add an image for image-only or verified paired inference. The API accepts these requests at `POST /v1/inspections/multimodal` with a server-configured model ID. Both entry points support a deterministic fixture and trusted local product checkpoints. Product scores, weight status, and pairing evidence appear in the versioned JSON result and dashboard. Detection boxes retain their original-image coordinates.
+
+The Python evaluation interfaces freeze one Validation cohort for image, sensor, and paired comparisons, with a separate native detector mAP report for the same samples. Pending reports can be recorded before trained product checkpoints are available. [Multimodal inference, fixture setup, and evaluation](docs/multimodal-inference.md)
+
 ## Run the synthetic inspection demonstration
 
 Run these commands from the repository root with the API and HTTPX test extras available.

@@ -118,6 +118,14 @@ produces no boxes. A row with neither usable input has an empty score list.
 
 ## State and future experiments
 
+The inspection coordinator calls `MultimodalModel.predict` with label-free
+`ProductInput` instances built from verified evidence. It preserves the
+checkpoint's branch training status and reports original-image boxes from a
+separately configured detector. The CLI and API require capture-time sensor
+preprocessing and a verified receipt for paired requests. The Validation
+interfaces compare exact branch coverage on a common cohort.
+[Multimodal inference and evaluation](multimodal-inference.md)
+
 Version the architecture, target policy and preprocessing association. Use
 deterministic CPU initialization and a separate tensor-only checkpoint format
 with strict key, shape and dtype checks. Newly initialized components are

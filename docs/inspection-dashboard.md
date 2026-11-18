@@ -17,6 +17,7 @@ The default model catalog includes `mock-empty` and `mock-defect`. Submit a loca
 ## Browse inspections
 
 - Filter by UTC date, outcome, canonical defect class, detector family, exact public model ID, or exact version 4 inspection UUID. The settings apply to both overview and history. Mock records have no detector family.
+- Filter by submitted image, sensor, or paired evidence. Product details show the scored branch, sensor usability, weight status, and pairing fingerprint separately from the original-image detection overlay. Sensor-only records display their product evidence without an image. Untrained and unavailable product rows remain visible in history and are excluded from production statistics.
 - The default range includes today and the previous 29 UTC dates. **From** and **Through** are inclusive calendar dates. Choose up to 366 days per query. The trend includes zero-count days for nonempty results.
 - Total inspections counts records. Total detections counts retained boxes. Defect distributions show both counts for each class. A class filter selects matching inspections, and the overview includes every class detected on those inspections. The detector chart groups by public model ID.
 - Use **Rows**, **Sort**, **Previous**, and **Next** to page through history. Equal timestamps are ordered by inspection UUID. JSON and CSV buttons export the current filtered page from the server. Use `ict history export` for a full export. The JSON export and detail view preserve both schema versions.
