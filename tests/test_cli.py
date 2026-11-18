@@ -42,7 +42,7 @@ def test_version_matches_installed_package() -> None:
     assert result.stderr == ""
 
 
-@pytest.mark.parametrize("command", [command for command in COMMANDS if command != "doctor"])
+@pytest.mark.parametrize("command", [command for command in COMMANDS if command not in {"doctor", "setup"}])
 def test_planned_command_reports_unavailability(
     command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

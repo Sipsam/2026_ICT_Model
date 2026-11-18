@@ -1,0 +1,6 @@
+execution_mode: local
+output_path: outputs
+model: yolo
+device: cpu
+training_profile: smoke
+tracking: "off"

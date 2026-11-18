@@ -9,6 +9,9 @@ description = "CLI for the ICT manufacturing defect detection pipeline"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "pydantic>=2,<3",
+    "python-dotenv>=1,<2",
+    "PyYAML>=6,<7",
     "rich>=13",
     "typer>=0.16",
 ]
@@ -23,6 +26,9 @@ ict = "ict_pipeline.cli:app"
 where = ["src"]
 include = ["ict_pipeline", "ict_pipeline.*"]
 namespaces = false
+
+[tool.setuptools.package-data]
+"ict_pipeline.config" = ["default.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,6 +1,7 @@
 """Command-line interface for the ICT pipeline."""
 
 import json
+import os
 from importlib.metadata import version
 from pathlib import Path
 from typing import Annotated, NoReturn
@@ -18,6 +19,7 @@ app = typer.Typer(
     help="ICT manufacturing defect detection pipeline.",
     no_args_is_help=True,
     add_completion=False,
+    pretty_exceptions_show_locals=False,
 )
 
 
@@ -119,9 +121,46 @@ def doctor(
         _print_environment(report)
 
 
-@app.command(help="Configure the pipeline (planned).")
-def setup() -> None:
-    _not_implemented("setup")
+@app.command(help="Configure the pipeline with a wizard or validate and save headless settings.")
+def setup(
+    config: Annotated[Path | None, typer.Option(help="Read settings from this YAML file.")] = None,
+    non_interactive: Annotated[bool, typer.Option(help="Validate settings without prompting.")] = False,
+    dry_run: Annotated[bool, typer.Option(help="Validate and preview settings without saving.")] = False,
+    replace: Annotated[bool, typer.Option(help="Allow headless replacement of configs/local.yaml.")] = False,
+    execution_mode: Annotated[str | None, typer.Option(help="local, wsl, docker, or remote.")] = None,
+    dataset_source: Annotated[str | None, typer.Option(help="aihub, existing, or skip.")] = None,
+    data_path: Annotated[str | None, typer.Option(help="Dataset directory.")] = None,
+    output_path: Annotated[str | None, typer.Option(help="Output directory.")] = None,
+    model: Annotated[str | None, typer.Option(help="yolo, faster_rcnn, or rt_detr.")] = None,
+    device: Annotated[str | None, typer.Option(help="auto, cpu, cuda, rocm, or mps.")] = None,
+    training_profile: Annotated[str | None, typer.Option(help="smoke, standard, or full.")] = None,
+    tracking: Annotated[str | None, typer.Option(help="off, local, or mlflow.")] = None,
+) -> None:
+    from .config.settings import SetupError
+    from .wizard import run_setup
+
+    overrides = {
+        "execution_mode": execution_mode,
+        "dataset_source": dataset_source,
+        "data_path": data_path,
+        "output_path": output_path,
+        "model": model,
+        "device": device,
+        "training_profile": training_profile,
+        "tracking": tracking,
+    }
+    try:
+        run_setup(
+            Path.cwd(), config, os.environ,
+            {name: value for name, value in overrides.items() if value is not None},
+            non_interactive=non_interactive, dry_run=dry_run, replace=replace,
+        )
+    except SetupError as exc:
+        typer.echo(f"Setup failed. {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    except (typer.Abort, KeyboardInterrupt, EOFError):
+        typer.echo("Setup cancelled.", err=True)
+        raise typer.Exit(code=130) from None
 
 
 @app.command(help="Run pipeline stages (planned).")
