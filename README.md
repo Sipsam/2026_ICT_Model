@@ -32,7 +32,25 @@ The CLI runs without PyTorch, GPU libraries, or dataset files.
 
 `ict --help` lists the registered commands, and `ict --version` prints the installed package version. Both exit with status `0`.
 
-`data`, `train`, `evaluate`, `compare`, `report`, and `clean` are placeholders and exit with status `1`. Existing dataset tools can be invoked directly from `scripts/` with their own dependencies. The rollout is described in [PLANS.md](PLANS.md).
+`train`, `evaluate`, `compare`, `report`, and `clean` are placeholders and exit with status `1`. Existing audit and conversion tools can be invoked directly from `scripts/` with their own dependencies. The rollout is described in [PLANS.md](PLANS.md).
+
+## Acquire and verify dataset 71900
+
+```text
+ict data status
+ict data verify
+ict data download
+ict data download --approve-download
+ict data extract
+```
+
+The packaged [SMT dataset selection](src/ict_pipeline/data/aihub_smt.yaml) records the 60 file keys from [the original download script](scripts/download_data.sh). It covers Training and Validation for normal and defect cold solder, misalignment, short, missing component, and tombstone groups, with JPG images, JSON labels, and XLSX sensors. Use `ict data --raw-dir <archive-root> --data-path <dataset-root> <command>` to override the default archive and dataset directories. The dataset root can also come from setup.
+
+`ict data download` checks local data and previews any missing split transfers. The approval flag authorizes the listed transfers. The provider checks free space, write permissions, API reachability, and the local `AIHUB_API_KEY` supplied through `.env` or the environment. AI Hub checks the key and dataset access on the authorized request. Linux, WSL, and macOS use curl. On Windows the provider discovers an installed WSL distribution with curl and streams files into the Windows archive root. Set `ICT_WSL_DISTRIBUTION` to select a distribution explicitly. Existing English-layout data and local ZIPs work independently of WSL, curl, and AI Hub credentials. The transport uses the v0.6 request format verified in [AI Hub's aihubshell workflow](https://www.aihub.or.kr/devsport/apishell/list.do).
+
+Validated bundles are kept under `data/raw/.ict-aihub/` by selection and split. Interrupted transfers remain as `.partial` files. A retry starts a fresh transfer for the affected split and reuses any verified completed split. The downloader checks bundle integrity and ZIP CRCs before publishing a checkpoint. The file keys and size caps are based on the repository's historical XLSX selection. If AI Hub changes the selection or format, ingestion reports a failed validation.
+
+`ict data extract` publishes a new English-layout dataset directory with `.ict-ingestion.json`, which records the selection fingerprint, selected file-tree hash, and counts per split. Source archives are retained. `ict data verify` checks selected folder coverage, matched sample stems, basic file signatures, and the completion hash when present. Run the existing audit scripts for annotation and sensor-content validation.
 
 ## Plan, inspect, and resume a pipeline run
 
@@ -43,7 +61,7 @@ ict status
 ict resume --run-id <id>
 ```
 
-The production DAG declares ten stages from download through report. Their adapters are scheduled for later phases, so a preview lists them as unavailable and an execution stops at the first stage that needs an adapter. The test suite executes a small DAG with synthetic files.
+The production DAG declares ten stages from download through report. With `dataset_source: aihub` or `dataset_source: existing` configured, `ict run --until extract` executes the two ingestion stages. Their artifacts are `archives/` and `dataset/` under the corresponding published attempt directories. When an existing dataset is selected, the download stage records its reuse and the extract stage copies the selected files into the run artifact. For missing transfers, `ict run --until extract --approve-download` authorizes acquisition. Pass the same approval flag to `ict resume` if a resumed run still needs transfers. Adapters from audit through report are planned.
 
 With executable stages registered, `ict run` selects the entire DAG and creates a run ID. Pass `--run-id <id>` to choose a name or reuse that run's cache. `--from` and `--until` select an inclusive range in dependency order. Repeat `--only` to select individual stages. Any omitted prerequisite must have a valid result in the same run. `--force` recomputes the selection in new artifact directories.
 

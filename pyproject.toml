@@ -29,6 +29,7 @@ namespaces = false
 
 [tool.setuptools.package-data]
 "ict_pipeline.config" = ["default.yaml"]
+"ict_pipeline.data" = ["aihub_smt.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

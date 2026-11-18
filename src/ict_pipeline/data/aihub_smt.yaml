@@ -1,0 +1,29 @@
+dataset_key: 71900
+process: SMT soldering
+defects: [cold_solder, misalignment, short, missing_component, tombstone]
+states: [normal, defect]
+extensions:
+  images: [.jpg, .jpeg]
+  sensors: [.xlsx]
+  annotations: [.json]
+raw_root: data/raw
+extracted_root: data/extracted
+preserve_source_archives: true
+provenance:
+  file_keys: scripts/download_data.sh (training and validation selections)
+  file_tree: https://api.aihub.or.kr/info/71900.do
+  dataset: https://www.aihub.or.kr/aihubdata/data/view.do?aihubDataSe=data&currMenu=115&dataSetSn=71900&topMenu=100
+  download_limits: Conservative per-split caps based on the legacy local ZIP totals and TAR overhead.
+splits:
+  train:
+    source_name: Training
+    max_download_bytes: 3221225472
+    images: [565695, 565696, 565697, 565699, 565702, 565707, 565708, 565709, 565711, 565714]
+    sensors: [565659, 565660, 565661, 565663, 565666, 565671, 565672, 565673, 565675, 565678]
+    annotations: [565731, 565732, 565733, 565735, 565738, 565743, 565744, 565745, 565747, 565750]
+  validation:
+    source_name: Validation
+    max_download_bytes: 536870912
+    images: [565803, 565804, 565805, 565807, 565810, 565815, 565816, 565817, 565819, 565822]
+    sensors: [565767, 565768, 565769, 565771, 565774, 565779, 565780, 565781, 565783, 565786]
+    annotations: [565839, 565840, 565841, 565843, 565846, 565851, 565852, 565853, 565855, 565858]

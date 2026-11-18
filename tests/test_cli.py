@@ -42,7 +42,7 @@ def test_version_matches_installed_package() -> None:
     assert result.stderr == ""
 
 
-@pytest.mark.parametrize("command", ["data", "train", "evaluate", "compare", "report", "clean"])
+@pytest.mark.parametrize("command", ["train", "evaluate", "compare", "report", "clean"])
 def test_planned_command_reports_unavailability(
     command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

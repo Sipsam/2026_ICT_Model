@@ -7,7 +7,7 @@ from time import monotonic
 from types import MappingProxyType
 from uuid import uuid4
 
-from .model import PipelineError, Stage, StageContext, StageGraph, StageResult, valid_id
+from .model import PipelineError, Stage, StageContext, StageFailure, StageGraph, StageResult, valid_id
 from .store import (
     FingerprintError, RunState, RunStore, StageRecord, digest_json, fingerprint_path,
     mark_interrupted, timestamp,
@@ -314,6 +314,8 @@ class StageRunner:
             context = StageContext(MappingProxyType(inputs), MappingProxyType(settings), temporary, final, progress)
             try:
                 result = stage.execute(context)
+            except StageFailure:
+                raise
             except OSError:
                 raise PipelineError(
                     f"Stage {name} encountered an I/O error. Check file access and available storage, then resume."

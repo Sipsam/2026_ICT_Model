@@ -13,6 +13,10 @@ from rich.table import Table
 from rich.text import Text
 
 from .config.settings import SetupError, merge_settings, validate_settings
+from .data.commands import data_app, dataset_paths, provider_for, show_download_plan
+from .data.ingestion import Acquisition, has_dataset
+from .data.model import DataError, load_selection
+from .data.stages import DataStages
 from .environment.doctor import collect_environment
 from .environment.model import EnvironmentReport
 from .pipeline import PipelineError, StageRunner
@@ -27,6 +31,9 @@ app = typer.Typer(
     add_completion=False,
     pretty_exceptions_show_locals=False,
 )
+
+
+app.add_typer(data_app, name="data")
 
 
 def _show_version(value: bool) -> None:
@@ -180,7 +187,7 @@ def _pipeline_progress(event: StageEvent) -> None:
     )
 
 
-def _pipeline(config: Path | None, run_id: str | None) -> StageRunner:
+def _pipeline(config: Path | None, run_id: str | None, approve_download: bool = False) -> StageRunner:
     from .config.storage import SetupFiles
 
     root = Path.cwd()
@@ -196,7 +203,19 @@ def _pipeline(config: Path | None, run_id: str | None) -> StageRunner:
                 settings[key] = (root / settings[key]).resolve().as_posix()
             except (OSError, RuntimeError, ValueError):
                 raise SetupError(f"Cannot resolve {key}. Check the path and permissions.") from None
-    return StageRunner(pipeline_stages(), root, settings, on_event=_pipeline_progress)
+    data = None
+    if settings["dataset_source"] != "skip":
+        selection = load_selection()
+        raw_root, dataset = dataset_paths(root, selection, credentials, None, Path(settings["data_path"]))
+        settings["raw_path"] = raw_root.as_posix()
+        existing = dataset if settings["dataset_source"] == "existing" or has_dataset(dataset, selection) else None
+        acquisition = Acquisition(selection, raw_root)
+        data = DataStages(
+            acquisition, provider_for(credentials, os.environ), existing, approve_download,
+            lambda missing: show_download_plan(acquisition, missing),
+        )
+    stages = pipeline_stages() if data is None else pipeline_stages(data)
+    return StageRunner(stages, root, settings, on_event=_pipeline_progress)
 
 
 def _pipeline_failure(exc: Exception) -> NoReturn:
@@ -209,6 +228,7 @@ def _pipeline_failure(exc: Exception) -> NoReturn:
 
 RunIdOption = Annotated[str | None, typer.Option(help="Identify a saved run under runs/.")]
 ConfigOption = Annotated[Path | None, typer.Option(help="Read settings from this YAML file.")]
+ApprovalOption = Annotated[bool, typer.Option("--approve-download", help="Authorize missing AI Hub transfers.")]
 
 
 @app.command(help="Plan or execute selected pipeline stages.")
@@ -220,9 +240,10 @@ def run(
     force: Annotated[bool, typer.Option(help="Recompute the selected stages in new artifact directories.")] = False,
     run_id: RunIdOption = None,
     config: ConfigOption = None,
+    approve_download: ApprovalOption = False,
 ) -> None:
     try:
-        runner = _pipeline(config, run_id)
+        runner = _pipeline(config, run_id, approve_download)
         selection = runner.graph.select(start, until, only or ())
         if dry_run:
             for step in runner.plan(selection, run_id=run_id, force=force):
@@ -233,7 +254,7 @@ def run(
             typer.echo(f"Run ID   {run_id}")
         runner.run(run_id, selection, force=force)
         typer.echo(f"Run {run_id} completed.")
-    except (PipelineError, SetupError, OSError, ValueError) as exc:
+    except (PipelineError, SetupError, DataError, OSError, ValueError) as exc:
         _pipeline_failure(exc)
     except KeyboardInterrupt:
         typer.echo("Run cancelled. Use ict status and ict resume to continue.", err=True)
@@ -261,20 +282,17 @@ def status(run_id: RunIdOption = None) -> None:
 
 
 @app.command(help="Resume the last selection for a saved run and verify its cached results.")
-def resume(run_id: RunIdOption = None, config: ConfigOption = None) -> None:
+def resume(
+    run_id: RunIdOption = None, config: ConfigOption = None, approve_download: ApprovalOption = False,
+) -> None:
     try:
-        state = _pipeline(config, run_id).resume(run_id)
+        state = _pipeline(config, run_id, approve_download).resume(run_id)
         typer.echo(f"Run {state.run_id} completed.")
-    except (PipelineError, SetupError, OSError, ValueError) as exc:
+    except (PipelineError, SetupError, DataError, OSError, ValueError) as exc:
         _pipeline_failure(exc)
     except KeyboardInterrupt:
         typer.echo("Run cancelled. Use ict status and ict resume to continue.", err=True)
         raise typer.Exit(code=130) from None
-
-
-@app.command(help="Manage pipeline datasets (planned).")
-def data() -> None:
-    _not_implemented("data")
 
 
 @app.command(help="Train detection models (planned).")

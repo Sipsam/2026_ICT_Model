@@ -11,6 +11,10 @@ class PipelineError(Exception):
     """An operator-facing diagnostic produced by the runner."""
 
 
+class StageFailure(PipelineError):
+    """An adapter failure with a diagnostic safe to persist in run state."""
+
+
 _WINDOWS_DEVICE = re.compile(r"(?:con|prn|aux|nul|com[0-9]|lpt[0-9])", re.IGNORECASE)
 
 
