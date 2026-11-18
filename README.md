@@ -135,6 +135,8 @@ Training resumes from each model's latest verified epoch checkpoint. The runner 
 
 ## Train detection models
 
+Use `ict recommend --all` on the training host to inspect model readiness and starting batch sizes, precision, workers, and resource estimates. Use `ict pilot prepare` to derive a bounded cohort from a sealed split bundle, then preview training with `ict pilot run`. Adding `--approve-train` authorizes only the displayed pilot. Pilots keep their own checkpoint and Validation reports under the cohort's `attempts/` directory. [Hardware recommendations and pilot workflow](docs/gpu-training-pilot.md)
+
 ```text
 ict train --model faster_rcnn --dry-run
 ict train --model faster_rcnn --config-dir configs/models --approve-train
@@ -284,7 +286,7 @@ Use the `paired` report rows to compare modalities on the same Validation sample
 
 `ict doctor` displays the local report. `ict doctor --json` writes one JSON document to stdout using the [version 1 schema](docs/doctor.schema.json). A completed report exits with status `0` even when optional tools or backends are unavailable. Missing measurements use `null`. Capabilities use `available`, `unavailable`, or `unknown`. Memory and disk measurements are in bytes, and free disk refers to the filesystem containing the current directory. RAM and logical CPU counts describe the environment as reported by the OS and may exceed container limits.
 
-GPU inventory is best effort. PyTorch availability comes from PyTorch itself, and readiness requires a small tensor operation and a successful scalar readback. CUDA and ROCm test the first visible device. Apple unified memory and unreported dedicated VRAM appear as unknown. Tool statuses reflect executable discovery and, for the repository's AI Hub helper, file presence. Docker daemon access, WSL distributions, AI Hub credentials, and remote hosts are outside the probe. Container detection relies on visible runtime markers.
+GPU inventory is best effort. PyTorch availability comes from PyTorch itself, and readiness requires a small tensor operation and a successful scalar readback. CUDA and ROCm test the first visible device and measure its free and total memory when available. MPS reports PyTorch's shared-memory recommendation when available. The report lists tested precisions and selected detector operators, and reports available host RAM separately from total RAM. Tool statuses reflect executable discovery and, for the repository's AI Hub helper, file presence. Container detection relies on visible runtime markers. [Hardware checks and pilot execution](docs/gpu-training-pilot.md)
 
 `local_cpu` covers CLI diagnostics and CPU preprocessing. The `torch_*` modes describe the tested device operations. The WSL and container modes show whether the current process is already running in those environments or their readiness is unverified. External hardware commands have individual timeouts of at most eight seconds, and the isolated PyTorch process has a 20-second timeout.
 

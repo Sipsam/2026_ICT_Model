@@ -44,12 +44,13 @@
     "resources": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["cpu_model", "logical_cpus", "ram_bytes", "working_directory_free_bytes"],
+      "required": ["cpu_model", "logical_cpus", "ram_bytes", "working_directory_free_bytes", "available_ram_bytes"],
       "properties": {
         "cpu_model": {"$ref": "#/$defs/optional_string"},
         "logical_cpus": {"type": ["integer", "null"], "minimum": 1},
         "ram_bytes": {"$ref": "#/$defs/optional_bytes"},
-        "working_directory_free_bytes": {"$ref": "#/$defs/optional_bytes"}
+        "working_directory_free_bytes": {"$ref": "#/$defs/optional_bytes"},
+        "available_ram_bytes": {"$ref": "#/$defs/optional_bytes"}
       }
     },
     "gpu": {
@@ -79,7 +80,13 @@
       "required": ["availability", "readiness"],
       "properties": {
         "availability": {"$ref": "#/$defs/status"},
-        "readiness": {"$ref": "#/$defs/status"}
+        "readiness": {"$ref": "#/$defs/status"},
+        "device_name": {"$ref": "#/$defs/optional_string"},
+        "free_device_bytes": {"$ref": "#/$defs/optional_bytes"},
+        "total_device_bytes": {"$ref": "#/$defs/optional_bytes"},
+        "shared_memory_limit_bytes": {"$ref": "#/$defs/optional_bytes"},
+        "precisions_tested": {"type": "array", "items": {"enum": ["fp32", "fp16", "bf16"]}},
+        "operators_tested": {"type": "array", "items": {"enum": ["nms", "roi_align_backward"]}}
       }
     },
     "torch": {

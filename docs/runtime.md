@@ -17,6 +17,8 @@ Each workflow has a different input contract.
 
 `preflight` checks paths, required dependencies, storage availability, and the requested device before work starts. For model workflows it checks that PyTorch completes an operation on the requested device. Select `--device cpu` explicitly when CPU model execution is intended. Initial setup files may describe the preferred mode. Choose the executor explicitly via `ict runtime`; the ordinary `ict run` remains the native stage runner.
 
+Training preflight reports available RAM, the requested PyTorch device's probe results and memory where available, model-specific precision and operator checks, and storage readiness. It validates the selected profile's image size, batch size, workers, and gradient accumulation. Run `ict recommend` and `ict pilot` in the target Python environment, such as an SSH session or a provisioned container with the split bundle and weight cache visible. These commands run in the foreground on that target. Continue to use the existing `ict runtime` executors for submitted jobs. A successful preflight verifies small probe operations. An approved pilot is needed to test actual model execution. [Hardware recommendations and pilot workflow](gpu-training-pilot.md)
+
 For the complete detection DAG, use the [end-to-end commands](../README.md#run-end-to-end-detection) inside the target's installed environment. In a container, use a writable workspace for `runs/` and mount extracted inputs read-only. On a remote host, enter a provisioned session and use server-side dataset and YAML paths. The `ict runtime` Docker and SSH job interfaces support the individual workflows listed above.
 
 ## Local and WSL2

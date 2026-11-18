@@ -30,6 +30,7 @@ from .pipeline.model import valid_id
 from .pipeline.runner import StageEvent
 from .pipeline.stages import CLASSIFICATION_STAGES, pipeline_stages
 from .pipeline.store import RunState, RunStore
+from .pilot_commands import pilot_app, recommend_command
 from .reporting.commands import compare, report, runs_app, status
 from .runtime.commands import runtime_app
 
@@ -46,6 +47,8 @@ app.add_typer(data_app, name="data")
 app.add_typer(integrity_app, name="integrity")
 app.add_typer(runs_app, name="runs")
 app.add_typer(runtime_app, name="runtime")
+app.add_typer(pilot_app, name="pilot")
+app.command("recommend")(recommend_command)
 app.command()(status)
 app.command()(compare)
 app.command()(report)
@@ -100,6 +103,7 @@ def _print_environment(report: EnvironmentReport) -> None:
         ("CPU", _display_value(resources.cpu_model)),
         ("Logical CPUs", _display_value(resources.logical_cpus)),
         ("RAM", _display_bytes(resources.ram_bytes)),
+        ("Available RAM", _display_bytes(resources.available_ram_bytes)),
         ("Free disk (working directory)", _display_bytes(resources.working_directory_free_bytes)),
         ("GPU inventory", graphics.inventory),
     ]
@@ -116,7 +120,16 @@ def _print_environment(report: EnvironmentReport) -> None:
         ("ROCm build", _display_value(torch.rocm_build)),
     ])
     for name, backend in (("CPU", torch.cpu), ("CUDA", torch.cuda), ("ROCm", torch.rocm), ("MPS", torch.mps)):
-        rows.append((f"PyTorch {name}", f"Availability  {backend.availability}\nReadiness     {backend.readiness}"))
+        value = f"Availability  {backend.availability}\nTensor test   {backend.readiness}"
+        if backend.device_name is not None:
+            value += f"\nDevice 0   {backend.device_name}"
+        if backend.total_device_bytes is not None:
+            value += f"\nDevice 0 VRAM   {_display_bytes(backend.free_device_bytes)} free / {_display_bytes(backend.total_device_bytes)} total"
+        if backend.shared_memory_limit_bytes is not None:
+            value += f"\nShared memory recommendation   {_display_bytes(backend.shared_memory_limit_bytes)}"
+        if backend.precisions_tested:
+            value += "\nTested precisions   " + ", ".join(backend.precisions_tested)
+        rows.append((f"PyTorch {name}", value))
     for label, value in rows:
         table.add_row(label, Text(value))
     console = Console()

@@ -28,6 +28,7 @@ class Resources:
     logical_cpus: int | None
     ram_bytes: int | None
     working_directory_free_bytes: int | None
+    available_ram_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,12 @@ class Graphics:
 class Backend:
     availability: Status = "unknown"
     readiness: Status = "unknown"
+    device_name: str | None = None
+    free_device_bytes: int | None = None
+    total_device_bytes: int | None = None
+    shared_memory_limit_bytes: int | None = None
+    precisions_tested: tuple[str, ...] = ()
+    operators_tested: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

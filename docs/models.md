@@ -49,6 +49,8 @@ For Faster R-CNN, use `revision: COCO_V1` and the official checkpoint from the T
 
 `freeze_backbone` defaults to `false`. When enabled, YOLO freezes the YAML backbone layers and their batch-normalization statistics, Faster R-CNN freezes the MobileNet body, and RT-DETR freezes the ResNet body. FPN layers, transformer components outside the backbone, and heads can still train. Fine-tuning optimizer and LR overrides fall back to the model profile's `optimizer` and `lr`. Optional decay and momentum fall back to backend defaults. `momentum` controls SGD momentum or Adam/AdamW's first beta. YOLO SGD requires positive momentum and retains native Nesterov, warmup, accumulation and decay scaling.
 
+Model YAML supports `workers` (default 0). Ultralytics forces zero workers on CPU and MPS and may cap requested workers on GPU. Set `gradient_accumulation` for Faster R-CNN or RT-DETR to the number of microbatches per optimizer step (default 1). COCO adapters weight microbatch losses by image count and step on a partial group at epoch end. YOLO uses its native accumulation schedule. Changing workers or accumulation requires a new training run. [Hardware recommendations and pilot workflow](gpu-training-pilot.md)
+
 ## Preview, run, and resume
 
 ```text

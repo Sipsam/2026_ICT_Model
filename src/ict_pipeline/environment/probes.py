@@ -289,9 +289,50 @@ def probe_hardware(host: Host, directory: Path) -> tuple[Resources, Graphics]:
         if version and re.fullmatch(r"\d+(?:\.\d+)+", version):
             driver = version
     return (
-        Resources(cpu, os.cpu_count(), ram, free),
+        Resources(cpu, os.cpu_count(), ram, free, available_ram(host.os)),
         Graphics("available" if devices else "unknown", tuple(devices), nvidia_smi, driver),
     )
+
+
+def available_ram(system: str) -> int | None:
+    if system == "Linux":
+        match = re.search(r"^MemAvailable:\s+(\d+) kB$", _read(_PROC / "meminfo") or "", re.M)
+        available = int(match[1]) * 1024 if match else None
+        # In a container, host MemAvailable can exceed its cgroup budget.
+        group = next((line[3:] for line in (_read(_PROC / "self/cgroup") or "").splitlines()
+                      if line.startswith("0::/")), "/")
+        mount = Path("/sys/fs/cgroup")
+        leaf = mount / group.lstrip("/")
+        for directory in (leaf, *leaf.parents):
+            if not directory.is_relative_to(mount):
+                break
+            limit = _positive_int(_read(directory / "memory.max"))
+            used = _positive_int(_read(directory / "memory.current"))
+            if limit is not None and used is not None:
+                remaining = max(0, limit - used)
+                available = remaining if available is None else min(remaining, available)
+        return available
+    if system == "Windows" and sys.platform == "win32":
+        import ctypes
+
+        class MemoryStatus(ctypes.Structure):
+            _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong)] + [
+                (name, ctypes.c_ulonglong) for name in
+                ("total", "available", "page_total", "page_available", "virtual_total", "virtual_avail", "extended")
+            ]
+
+        status = MemoryStatus()
+        status.length = ctypes.sizeof(status)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return int(status.available)
+    if system == "Darwin" and (vm_stat := shutil.which("vm_stat")):
+        _, output = run_probe([vm_stat])
+        page = re.search(r"page size of (\d+) bytes", output)
+        free = re.search(r"^Pages free:\s+(\d+)\.", output, re.M)
+        inactive = re.search(r"^Pages inactive:\s+(\d+)\.", output, re.M)
+        if page and free and inactive:
+            return int(page[1]) * (int(free[1]) + int(inactive[1]))
+    return None
 
 
 def probe_tools(host: Host, directory: Path) -> dict[str, Status]:

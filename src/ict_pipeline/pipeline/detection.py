@@ -23,7 +23,9 @@ from ..evaluation.metrics import detection_metrics
 from ..models.contracts import ModelName, Progress, TrainConfig, TrainingError
 from ..models.dataset import Split, inspect_data
 from ..models.registry import REGISTRY
-from ..models.training import STORAGE_PREDECESSORS, TrainingPlan, checkpoint_paths, execute_training, read_training_profile
+from ..models.training import (
+    ADAPTIVE_FIELDS, TrainingPlan, checkpoint_paths, compatible_predecessors, execute_training, read_training_profile,
+)
 from ..models.weights import checkpoint_source, training_scope, verify_weights, weight_packages
 from ..reporting.export import ReportFormat, report_document, write_report_file
 from ..training_storage import commit_checkpoint, guard_training_write
@@ -102,7 +104,8 @@ class DetectionStages:
             for path in sorted((Path(__file__).parents[1] / "models").glob("*.py"))
         }
         return digest_json({
-            "config": config.model_dump(mode="json"), "profile": fingerprint,
+            "config": config.model_dump(mode="json", exclude=ADAPTIVE_FIELDS if predecessor else None),
+            "profile": fingerprint,
             "runtime": [platform.python_version(), platform.system(), platform.machine()],
             "packages": _package_versions(REGISTRY[name].libraries + weight_packages(config)),
             "code": {**code, **(predecessor or {})},
@@ -154,7 +157,7 @@ class DetectionStages:
             root = recovery_root()
             model, resume = self._recover(root, name, config, profile_hash, revision)
             if model is None:
-                for predecessor in STORAGE_PREDECESSORS:
+                for predecessor in compatible_predecessors(config):
                     model, earlier_resume = self._recover(recovery_root(predecessor), name, config, profile_hash, revision)
                     resume = resume or earlier_resume
                     if model is not None:
@@ -194,7 +197,7 @@ class DetectionStages:
                     if (
                         record.get("schema_version") != 1 or record.get("model") != name
                         or record.get("profile_fingerprint") != profile_hash
-                        or record.get("configuration") != config.model_dump(mode="json")
+                        or TrainConfig.model_validate(record.get("configuration")) != config
                         or digest_json(record.get("dataset_revision")) != digest_json(revision)
                     ):
                         continue

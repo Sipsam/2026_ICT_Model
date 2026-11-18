@@ -17,7 +17,7 @@ import pytest
 from typer.testing import CliRunner
 
 from ict_pipeline import cli
-from ict_pipeline.config.settings import CREDENTIAL_LABELS
+from ict_pipeline.config.settings import CREDENTIAL_LABELS, Credentials
 from ict_pipeline.data import ingestion, providers
 from ict_pipeline.data.model import Selection, Split
 from ict_pipeline.data.preprocessing import stages
@@ -30,8 +30,9 @@ from ict_pipeline.models import training
 from ict_pipeline.models.contracts import Checkpoints, ModelName, TrainConfig, TrainingRequest
 from ict_pipeline.models.dataset import Sample
 from ict_pipeline.models.registry import Backend, REGISTRY, resolve_device
+from ict_pipeline.pipeline.detection import DetectionStages
 from ict_pipeline.pipeline.model import StageContext, StageFailure, StageResult
-from ict_pipeline.pipeline.store import RunState, RunStore, fingerprint_path
+from ict_pipeline.pipeline.store import RunState, RunStore, digest_json, fingerprint_path
 
 from test_preprocessing import sample
 from test_training import config_directory, fake_torch, optional_runtime
@@ -550,6 +551,21 @@ def test_detection_dag_fresh_full_run_and_force_recovery(
     assert calls == {ModelName.YOLO: 1}
     interrupt.add(ModelName.YOLO)
     command("resume", "--run-id", "fresh", approve, code=130, contains="Run cancelled")
+    # Practice recovering a checkpoint stored under the previous model revision's identity.
+    state = journey.state("fresh")
+    folder = RunStore(journey.root / "runs", "fresh").recovery_dir("train", state.recovery_generations["train"])
+    record_path, = folder.rglob("run.json")
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    for key in training.ADAPTIVE_FIELDS:
+        del record["configuration"][key]
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    detectors = DetectionStages.configure(
+        journey.root, Credentials(), (ModelName.YOLO,), config, EvaluationConfig(image_size=64),
+        False, lambda _: None,
+    )
+    previous_revision = detectors.model_revision(ModelName.YOLO, training.ADAPTIVE_PREDECESSORS[-1])
+    previous_root = folder / digest_json([record["dataset_revision"], ModelName.YOLO, previous_revision, None])
+    record_path.parents[2].rename(previous_root)
     command("resume", "--run-id", "fresh", approve, contains="Detector checkpoints")
     assert calls == {ModelName.YOLO: 2}
     assert journey.state("fresh").stages["train"].attempt != first.stages["train"].attempt

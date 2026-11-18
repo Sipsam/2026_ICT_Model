@@ -11,6 +11,7 @@ from shutil import disk_usage
 from subprocess import DEVNULL, Popen
 from time import monotonic
 
+from ..adaptive import Overrides, recommend
 from ..config.settings import Credentials, SetupError
 from ..data.ingestion import has_dataset
 from ..data.model import DataError, load_selection
@@ -99,6 +100,8 @@ def preflight(store: RunStore, task: JobRequest) -> dict[str, object]:
         rocm_build=environment.torch.rocm_build,
         nvidia_driver=environment.graphics.nvidia_driver,
         graphics=[asdict(device) for device in environment.graphics.devices],
+        available_ram_bytes=environment.resources.available_ram_bytes,
+        device_probe=asdict(getattr(environment.torch, task.device)),
     )
     if task.model and task.device not in REGISTRY[task.model].devices:
         report.update(ready=False, reason="The model does not support the requested device.")
@@ -120,6 +123,14 @@ def preflight(store: RunStore, task: JobRequest) -> dict[str, object]:
             profile = plan.models[task.model]
             source = plan.weight_sources.get(task.model)
             report["training"] = store.credentials.redact(training_scope(task.model, profile, source))
+            hardware = recommend(task.model, environment, Overrides(
+                device=task.device, precision=profile.precision, image_size=profile.image_size,
+                batch_size=profile.batch_size, workers=profile.workers,
+                gradient_accumulation=profile.gradient_accumulation if profile.gradient_accumulation != 1 else None,
+            ))
+            report["model_readiness"] = asdict(hardware)
+            if not hardware.checks_passed:
+                report.update(ready=False, reason=" ".join(hardware.issues))
             estimates = storage_estimates(plan)
             report["storage"] = [asdict(item) for item in estimates]
             report["storage_ready"] = True

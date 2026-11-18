@@ -76,6 +76,8 @@ class TrainConfig(BaseModel):
     checkpoint: CheckpointConfig | None = None
     freeze_backbone: bool = False
     fine_tuning: FineTuningConfig | None = None
+    workers: int = Field(default=0, ge=0)
+    gradient_accumulation: int = Field(default=1, ge=1)
 
     @model_validator(mode="after")
     def check_initialization(self) -> Self:
@@ -113,6 +115,7 @@ class TrainingRequest:
     record_transfer: Callable[[Mapping[str, object]], None] = lambda _: None
     cache_root: Path | None = None
     check_checkpoint_space: Callable[[], None] = lambda: None
+    record_overhead: Callable[[str, float], None] | None = None
 
 
 class ModelAdapter(Protocol):

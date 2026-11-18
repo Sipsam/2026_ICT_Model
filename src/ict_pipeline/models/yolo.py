@@ -2,10 +2,12 @@
 
 import math
 import os
+from collections.abc import Iterator
 from numbers import Real
 from pathlib import Path
 from shutil import copyfile
 from tempfile import TemporaryDirectory
+from time import perf_counter
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -14,6 +16,26 @@ from ..data.preprocessing.policy import NAMES
 from ..training_storage import commit_checkpoint, guard_training_write
 from .contracts import Checkpoints, TrainingError, TrainingRequest
 from .weights import LAYOUTS, load_weights, transfer_state
+
+
+class TimedLoader:
+    def __init__(self, loader: Any, request: TrainingRequest) -> None:
+        self.loader = loader
+        self.request = request
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.loader, name)
+
+    def __len__(self) -> int:
+        return len(self.loader)
+
+    def __iter__(self) -> Iterator[Any]:
+        started = perf_counter()
+        for batch in self.loader:
+            assert self.request.record_overhead is not None
+            self.request.record_overhead("loader_wait_seconds", perf_counter() - started)
+            yield batch
+            started = perf_counter()
 
 
 class YoloAdapter:
@@ -27,6 +49,7 @@ class YoloAdapter:
             return self._train_with_copy(request, Path(scratch))
 
     def _train_with_copy(self, request: TrainingRequest, directory: Path) -> Checkpoints:
+        started = perf_counter()
         total = sum(len(split.images) for split in request.data.splits.values())
         copied = 0
         for name, split in request.data.splits.items():
@@ -42,6 +65,8 @@ class YoloAdapter:
                 copyfile(label, labels / label.name)
                 copied += 1
                 request.progress("copy YOLO inputs", copied, total)
+        if request.record_overhead:
+            request.record_overhead("dataset_copy_seconds", perf_counter() - started)
         config_dir = request.output / "ultralytics-config"
         # Ultralytics falls back to a global or CWD directory if this parent is missing.
         config_dir.mkdir(exist_ok=True)
@@ -49,7 +74,13 @@ class YoloAdapter:
             "YOLO_AUTOINSTALL": "false", "YOLO_OFFLINE": "true",
             "YOLO_CONFIG_DIR": str(config_dir),
         }):
-            return self._train(request, directory)
+            try:
+                return self._train(request, directory)
+            finally:
+                if request.record_overhead:
+                    request.record_overhead("yolo_cache_logical_bytes", sum(
+                        path.stat().st_size for path in directory.rglob("*.cache") if path.is_file()
+                    ))
 
     def _train(self, request: TrainingRequest, directory: Path) -> Checkpoints:
         import torch
@@ -69,6 +100,23 @@ class YoloAdapter:
             raise TrainingError("The installed Ultralytics package is missing its YOLO11 architecture definition.")
 
         class OfflineTrainer(DetectionTrainer):
+            def get_dataloader(
+                self, dataset_path: str, batch_size: int = 16, rank: int = 0, mode: str = "train",
+            ) -> Any:
+                started = perf_counter()
+                loader = super().get_dataloader(dataset_path, batch_size, rank, mode)
+                if request.record_overhead:
+                    request.record_overhead("loader_setup_seconds", perf_counter() - started)
+                    return TimedLoader(loader, request)
+                return loader
+
+            def preprocess_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
+                started = perf_counter()
+                result = super().preprocess_batch(batch)
+                if request.record_overhead:
+                    request.record_overhead("batch_preparation_host_seconds", perf_counter() - started)
+                return result
+
             def get_model(self, cfg: Any = None, weights: Any = None, verbose: bool = True) -> Any:
                 model = super().get_model(cfg, weights=None, verbose=verbose)
                 if request.resume:
@@ -175,7 +223,7 @@ class YoloAdapter:
                 "optimizer": cfg.optimizer_name, "lr0": cfg.learning_rate, "seed": cfg.seed, "device": str(device),
                 "amp": cfg.precision == "fp16", "pretrained": False, "save": True,
                 "save_period": -1, "project": str(request.output.parent), "name": request.output.name,
-                "exist_ok": True, "workers": 0, "plots": False, "patience": 0, "val": True,
+                "exist_ok": True, "workers": cfg.workers, "plots": False, "patience": 0, "val": True,
                 **overrides,
             })
             trainer.world_size = int(device.type == "cuda")

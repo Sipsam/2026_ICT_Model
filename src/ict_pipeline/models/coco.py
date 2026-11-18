@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from shutil import copyfile
+from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
 from ..data.preprocessing.policy import NAMES
@@ -40,6 +41,15 @@ class CocoImages:
 def collate(items: list[tuple[Any, Sample]]) -> Batch:
     images, samples = zip(*items)
     return list(images), list(samples)
+
+
+def timed_batches(loader: Any, request: TrainingRequest) -> Iterator[Batch]:
+    started = perf_counter()
+    for batch in loader:
+        if request.record_overhead:
+            request.record_overhead("loader_wait_seconds", perf_counter() - started)
+        yield batch
+        started = perf_counter()
 
 
 def _atomic_copy(source: Path, target: Path) -> None:
@@ -106,7 +116,7 @@ class CocoAdapter:
         train, val = (
             DataLoader(
                 CocoImages(request.data.splits[split].samples), batch_size=cfg.batch_size,
-                shuffle=split == "train", generator=generator, collate_fn=collate, num_workers=0,
+                shuffle=split == "train", generator=generator, collate_fn=collate, num_workers=cfg.workers,
             )
             for split in ("train", "val")
         )
@@ -140,15 +150,21 @@ class CocoAdapter:
                 frozen_backbone.eval()
             request.progress(f"epoch {epoch}/{cfg.epochs} train batch", 0, len(train))
             train_loss = 0.0
-            for step, batch in enumerate(train, 1):
-                optimizer.zero_grad(set_to_none=True)
+            accumulation = cfg.gradient_accumulation
+            for step, batch in enumerate(timed_batches(train, request), 1):
+                group_start = ((step - 1) // accumulation) * accumulation
+                group_images = min(accumulation * cfg.batch_size, len(train.dataset) - group_start * cfg.batch_size)
+                if step == group_start + 1:
+                    optimizer.zero_grad(set_to_none=True)
                 with torch.autocast(device_type, dtype=dtype, enabled=mixed):
                     loss = self.batch_loss(model, batch, request)
                 if not loss.isfinite().item():
                     raise TrainingError("Training produced a non-finite loss. Try fp32 or lower lr.")
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
+                scaled_loss = loss if accumulation == 1 else loss * (len(batch[1]) / group_images)
+                scaler.scale(scaled_loss).backward()
+                if step % accumulation == 0 or step == len(train):
+                    scaler.step(optimizer)
+                    scaler.update()
                 train_loss += loss.detach().item() * len(batch[1])
                 request.progress(f"epoch {epoch}/{cfg.epochs} train batch", step, len(train))
 
@@ -158,7 +174,7 @@ class CocoAdapter:
             torch.manual_seed(cfg.seed)
             request.progress(f"epoch {epoch}/{cfg.epochs} validation batch", 0, len(val))
             with torch.no_grad():
-                for step, batch in enumerate(val, 1):
+                for step, batch in enumerate(timed_batches(val, request), 1):
                     with torch.autocast(device_type, dtype=dtype, enabled=mixed):
                         loss = self.batch_loss(model, batch, request)
                     if not loss.isfinite().item():
@@ -243,6 +259,7 @@ class FasterRCNNAdapter(CocoAdapter):
         import torch
         from torchvision.transforms.functional import pil_to_tensor
 
+        started = perf_counter()
         images, samples = batch
         pixels = [pil_to_tensor(image).to(request.device, dtype=torch.float32) / 255 for image in images]
         targets = []
@@ -252,6 +269,8 @@ class FasterRCNNAdapter(CocoAdapter):
                 "boxes": torch.tensor(boxes, dtype=torch.float32, device=request.device).reshape(-1, 4),
                 "labels": torch.tensor([obj.category for obj in sample.objects], dtype=torch.int64, device=request.device),
             })
+        if request.record_overhead:
+            request.record_overhead("batch_preparation_host_seconds", perf_counter() - started)
         return sum(model(pixels, targets).values())
 
     def validation_mode(self, model: Any) -> None:
@@ -314,6 +333,7 @@ class RTDETRAdapter(CocoAdapter):
         from PIL import Image
         from torchvision.transforms.functional import pil_to_tensor
 
+        started = perf_counter()
         images, samples = batch
         size = request.config.image_size
         pixels = torch.stack([
@@ -331,4 +351,6 @@ class RTDETRAdapter(CocoAdapter):
                     [obj.category - 1 for obj in sample.objects], dtype=torch.int64, device=request.device,
                 ),
             })
+        if request.record_overhead:
+            request.record_overhead("batch_preparation_host_seconds", perf_counter() - started)
         return model(pixel_values=pixels, labels=labels).loss

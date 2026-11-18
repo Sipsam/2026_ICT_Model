@@ -27,6 +27,7 @@ from ..data.preprocessing.common import require_separate_output
 from ..data.preprocessing.console import protect_source_data
 from ..data.preprocessing.policy import label_policy
 from ..data.preprocessing.revision import read_dataset_seal
+from ..environment.monitor import logical_file_bytes, observe_training
 from ..pipeline.model import PipelineError
 from ..pipeline.store import RunStore, digest_json, fingerprint_path, timestamp
 from ..reporting.attempt import track_attempt
@@ -77,6 +78,33 @@ STORAGE_PREDECESSORS = ({
 })
 
 
+# Previous checkpoints are compatible only with the original worker and accumulation defaults.
+ADAPTIVE_PREDECESSORS = ({
+    "contracts.py": "3c6588f5de32b14833fbe88676e75882d6a6470af57597a3426a233518ddd226",
+    "training.py": "42186b1de4503213c0c481439af4915622f333b9c701bdca019070dd06cee078",
+    "coco.py": "6a43e47fb1452b7a9863e417c53910840ad9d5d15330a948027d94cca56e07e0",
+    "yolo.py": "0fea6e9c2a92ab18dd3178b0caa005b47b5835149c2ad9b9c228f4a06ffb03ef",
+}, {
+    "contracts.py": "d2e52436b2b8af7ad3b914562d88a3705c3927264b56e19ae43f235abd2c08d1",
+    "training.py": "42186b1de4503213c0c481439af4915622f333b9c701bdca019070dd06cee078",
+    "coco.py": "779a32bfd80ac5f9a8151d825bd0bb44bb2e7d870fb324c88bb5f23999443b03",
+    "yolo.py": "458310a5aa01eae8c05784236937dc3d1e1dd608974b4fb3e9878dfbaa3b92d2",
+}, {
+    "contracts.py": "0fcce5ac483dc89e1056f98c8b6a4f7c3f068b3cf643c37febf71328c26d8d48",
+    "training.py": "82bec46704fac2ddc3750a6b9b6092c7bc510eb0d374b7f01010538d7e9974dd",
+    "coco.py": "48ef96f951b7c8f2bcc54e82293fb9ce177628f7f6ba65da9ccfc18b8735e179",
+    "yolo.py": "7f3baab68205a62021891f08ed0b1a1fb665e62ad935a69352dbc178e133a576",
+},)
+
+ADAPTIVE_FIELDS = {"workers", "gradient_accumulation"}
+
+
+def compatible_predecessors(config: TrainConfig) -> tuple[dict[str, str], ...]:
+    if config.workers == 0 and config.gradient_accumulation == 1:
+        return (*STORAGE_PREDECESSORS, *ADAPTIVE_PREDECESSORS)
+    return ()
+
+
 @dataclass(frozen=True)
 class TrainingPlan:
     models: dict[ModelName, TrainConfig]
@@ -90,6 +118,15 @@ class TrainingPlan:
     verified_data: Mapping[str, DetectionData] | None = None
     weight_sources: Mapping[ModelName, Path] = field(default_factory=dict)
     publish_checkpoints: bool = False
+    monitor_resources: bool = False
+
+
+def _validate_adapter_options(name: ModelName, config: TrainConfig, device: str) -> None:
+    if name == ModelName.YOLO:
+        if config.gradient_accumulation != 1:
+            raise TrainingError("YOLO uses its native accumulation schedule. Remove gradient_accumulation.")
+        if config.workers and device in ("cpu", "mps"):
+            raise TrainingError("YOLO forces zero DataLoader workers on CPU and MPS.")
 
 
 def read_training_profile(
@@ -101,7 +138,9 @@ def read_training_profile(
         values = yaml.safe_load(contents.decode("utf-8-sig"))
         if device is not None and isinstance(values, dict):
             values["device"] = device
-        return TrainConfig.model_validate(values), sha256(contents).hexdigest()
+        config = TrainConfig.model_validate(values)
+        _validate_adapter_options(name, config, config.device)
+        return config, sha256(contents).hexdigest()
     except ValidationError as exc:
         fields = [
             ".".join(map(str, error["loc"])) if error["loc"] and error["loc"][0] in TrainConfig.model_fields
@@ -224,8 +263,12 @@ def _execute_training(plan: TrainingPlan, progress: Progress) -> Iterator[tuple[
     except ValueError as exc:
         raise TrainingError(str(exc)) from None
     if seal is not None:
+        if plan.dataset_revision is not None and plan.dataset_revision.get("selected_split", seal) != seal:
+            raise TrainingError("The verified split selection changed before training.")
         revision = {**(plan.dataset_revision or {}), "selected_split": seal}
         plan = replace(plan, dataset_revision=revision)
+    elif plan.dataset_revision is not None and "selected_split" in plan.dataset_revision:
+        raise TrainingError("The verified split seal is missing.")
     if seal is not None or all((plan.dataset / fmt).is_dir() for fmt in ("yolo", "coco")):
         for data_format in ("yolo", "coco"):
             if data_format not in datasets:
@@ -240,6 +283,7 @@ def _execute_training(plan: TrainingPlan, progress: Progress) -> Iterator[tuple[
         try:
             torch = import_module("torch")
             device = resolve_device(torch, config, backend)
+            _validate_adapter_options(name, config, device)
             adapter = backend.load()
         except TrainingError:
             raise
@@ -287,24 +331,28 @@ def _train_model(
     if plan.dataset_revision is not None:
         metadata.update(dataset_revision=plan.dataset_revision, profile_fingerprint=plan.profile_fingerprint)
     resume_fingerprints = set()
-    if weights is None:
-        old_config = config.model_dump(exclude={"initialization", "checkpoint", "freeze_backbone", "fine_tuning"})
+    legacy_options = config.workers == 0 and config.gradient_accumulation == 1
+    if weights is None and legacy_options:
+        old_config = config.model_dump(exclude={
+            "initialization", "checkpoint", "freeze_backbone", "fine_tuning", *ADAPTIVE_FIELDS,
+        })
         old_code = {key: value for key, value in code.items() if key != "weights.py"}
         for changes in _LEGACY_SCRATCH_CHANGES:
             resume_fingerprints.add(digest_json({
                 **metadata, "configuration": old_config, "code_fingerprints": {**old_code, **changes},
             }))
-    else:
+    if weights is not None:
         metadata["pretrained_weights"] = {
             **weights.spec.model_dump(mode="json"), "source_classes": weights.source_classes,
             "file_sha256": weights.spec.sha256,
         }
     metadata["initialization_mode"] = config.initialization
     run_fingerprint = digest_json(metadata)
-    if plan.resume_from:
+    if plan.resume_from and legacy_options:
+        old_metadata = {**metadata, "configuration": config.model_dump(exclude=ADAPTIVE_FIELDS)}
         resume_fingerprints.update(
-            digest_json({**metadata, "code_fingerprints": {**code, **changes}})
-            for changes in STORAGE_PREDECESSORS
+            digest_json({**old_metadata, "code_fingerprints": {**code, **changes}})
+            for changes in compatible_predecessors(config)
         )
     resume_fingerprints.add(run_fingerprint)
     metadata.update({
@@ -319,6 +367,11 @@ def _train_model(
     verified_resume = plan.dataset_revision is not None or weights is not None
     store = RunStore(output.parent, name, plan.credentials)
     scratch = cache_root(plan) if name == ModelName.YOLO else None
+    resources: dict[str, object] = {}
+    overhead: dict[str, float] = {}
+    epoch_metrics: list[object] = []
+    if plan.monitor_resources:
+        metadata.update(resources=resources, overhead=overhead, epoch_metrics=epoch_metrics)
     with store.lock():
         last_logged = 0.0
         last_storage_check = float("-inf")
@@ -347,6 +400,8 @@ def _train_model(
         def record_metrics(values: Mapping[str, float]) -> None:
             metrics = {key: value for key, value in values.items() if math.isfinite(value)}
             metadata["metrics"] = plan.credentials.redact(metrics)
+            if plan.monitor_resources and "epoch" in metrics:
+                epoch_metrics.append(metadata["metrics"])
             if verified_resume and "epoch" in metrics:
                 metadata["checkpoints"] = _records(output, checkpoints)
                 metadata["checkpoint_epoch"] = metrics["epoch"]
@@ -355,6 +410,9 @@ def _train_model(
         def record_transfer(result: Mapping[str, object]) -> None:
             metadata["weight_transfer"] = plan.credentials.redact(dict(result))
             store.write_json("run.json", metadata)
+
+        def record_overhead(key: str, seconds_or_bytes: float) -> None:
+            overhead[key] = overhead.get(key, 0) + seconds_or_bytes
 
         store.write_json("run.json", metadata)
         try:
@@ -368,6 +426,8 @@ def _train_model(
                     )
                     if weights is not None and isinstance(saved.get("weight_transfer"), dict):
                         record_transfer(saved["weight_transfer"])
+                    if plan.monitor_resources and isinstance(saved.get("epoch_metrics"), list):
+                        epoch_metrics.extend(saved["epoch_metrics"])
                 report(f"starting on {device}", 0, config.epochs)
                 if resume and verified_resume and saved.get("checkpoint_epoch") == config.epochs:
                     guard_training_write(output, resume.best.stat().st_size + resume.last.stat().st_size)
@@ -377,9 +437,11 @@ def _train_model(
                     metadata.update(metrics=saved["metrics"], checkpoint_epoch=saved["checkpoint_epoch"])
                     result = checkpoints
                 else:
+                    if plan.monitor_resources:
+                        staged.enter_context(observe_training(device, resources))
                     result = adapter.train(TrainingRequest(
                         config, data, output, device, report, resume, record_metrics, weights, record_transfer,
-                        scratch, check_checkpoint_space,
+                        scratch, check_checkpoint_space, record_overhead if plan.monitor_resources else None,
                     ))
             if result != checkpoints or len(_records(output, result)) != 2:
                 raise TrainingError("Training did not produce both best and last checkpoints.")
@@ -402,6 +464,11 @@ def _train_model(
             metadata["error"] = message
             raise TrainingError(f"{name}. {message}") from None
         finally:
+            if plan.monitor_resources:
+                try:
+                    resources["checkpoint_logical_bytes"] = logical_file_bytes(checkpoints.last.parent.glob("*.pt"))
+                except OSError:
+                    resources["checkpoint_logical_bytes"] = None
             metadata["finished_at"] = timestamp()
             metadata["elapsed_seconds"] = round(monotonic() - started, 3)
             if not verified_resume or metadata["status"] == "completed":

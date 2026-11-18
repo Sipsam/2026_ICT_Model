@@ -80,6 +80,7 @@ def test_device_failure_and_approval_before_execution(
     monkeypatch.setattr(jobs, "collect_environment", lambda _path: SimpleNamespace(
         torch=Torch("available", version="2.6", cpu=Backend("available", "available")),
         graphics=SimpleNamespace(nvidia_driver="535.10", devices=()),
+        resources=SimpleNamespace(available_ram_bytes=None, working_directory_free_bytes=None, logical_cpus=8),
     ))
     executor = LocalExecutor()
     task = JobRequest(workflow="train", dataset=str(dataset), device="cuda", model="yolo")
@@ -113,8 +114,11 @@ def test_training_reuses_config_and_explicit_device(
         cached.write_bytes(b"runtime fixture")
         pretrained_profile(configs, ModelName.YOLO, cached)
     monkeypatch.setattr(jobs, "collect_environment", lambda _path: SimpleNamespace(
-        torch=Torch("available", version="2.6", cuda=Backend("available", "available")),
+        torch=Torch("available", version="2.6", cuda=Backend(
+            "available", "available", precisions_tested=("fp32",), operators_tested=("nms",),
+        )),
         graphics=SimpleNamespace(nvidia_driver="535.10", devices=()),
+        resources=SimpleNamespace(available_ram_bytes=None, working_directory_free_bytes=None, logical_cpus=8),
     ))
     monkeypatch.setattr(ModelBackend, "versions", lambda _self: {"ultralytics": "fixture"})
     plans = []
@@ -156,6 +160,7 @@ def test_evaluation_preflight_rejects_missing_best_checkpoint(
     monkeypatch.setattr(jobs, "collect_environment", lambda _path: SimpleNamespace(
         torch=Torch("available", version="2.6", cpu=Backend("available", "available")),
         graphics=SimpleNamespace(nvidia_driver=None, devices=()),
+        resources=SimpleNamespace(available_ram_bytes=None),
     ))
     task = JobRequest(workflow="evaluate", dataset=str(dataset), model_run=str(model_run))
     result = LocalExecutor().execute(WorkerRequest(

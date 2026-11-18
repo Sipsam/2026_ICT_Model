@@ -4,8 +4,8 @@ import json
 import re
 import sys
 from collections.abc import Callable
-from dataclasses import asdict
-from typing import Protocol
+from dataclasses import asdict, replace
+from typing import Any, Protocol
 
 from .model import Backend, Status, Torch
 from .probes import run_probe
@@ -45,7 +45,55 @@ def _check_backend(
     return Backend("available", "available" if ready else "unavailable")
 
 
-def _inspect_torch() -> Torch:
+def _measure(torch: Any, base: Backend, device: str) -> Backend:
+    if base.readiness != "available":
+        return base
+    details: dict[str, Any] = {}
+    if device.startswith("cuda:"):
+        try:
+            details["free_device_bytes"], details["total_device_bytes"] = torch.cuda.mem_get_info(device)
+            details["device_name"] = torch.cuda.get_device_name(device)
+        except Exception:
+            pass
+    if device == "mps":
+        try:
+            details["shared_memory_limit_bytes"] = torch.mps.recommended_max_memory()
+        except Exception:
+            pass
+    precisions = []
+    for mode in (("fp32", "fp16", "bf16") if device.startswith("cuda:") else ("fp32",)):
+        try:
+            if mode == "bf16" and not torch.cuda.is_bf16_supported(including_emulation=False):
+                continue
+            x = torch.ones((8, 8), device=device, requires_grad=True)
+            with torch.autocast("cuda", enabled=mode != "fp32",
+                                dtype=torch.bfloat16 if mode == "bf16" else torch.float16):
+                y = x @ x
+            if mode != "fp32" and y.dtype != (torch.bfloat16 if mode == "bf16" else torch.float16):
+                continue
+            y.float().mean().backward()
+            if torch.isfinite(x.grad).all().item():
+                precisions.append(mode)
+        except Exception:
+            continue
+    operators = []
+    try:
+        from torchvision.ops import nms, roi_align
+
+        box = torch.tensor([[0., 0., 2., 2.]], device=device)
+        if nms(box, torch.ones(1, device=device), 0.5).item() == 0:
+            operators.append("nms")
+        if device != "mps":
+            feature = torch.ones((1, 1, 4, 4), device=device, requires_grad=True)
+            roi_align(feature, [box], (2, 2)).sum().backward()
+            if torch.isfinite(feature.grad).all().item():
+                operators.append("roi_align_backward")
+    except Exception:
+        pass
+    return replace(base, precisions_tested=tuple(precisions), operators_tested=tuple(operators), **details)
+
+
+def _inspect_torch(*, detailed: bool = False) -> Torch:
     try:
         import torch
     except ModuleNotFoundError as error:
@@ -58,7 +106,7 @@ def _inspect_torch() -> Torch:
     cuda = getattr(torch.version, "cuda", None)
     rocm = getattr(torch.version, "hip", None)
     mps = getattr(torch.backends, "mps", None)
-    return Torch(
+    report = Torch(
         status="available",
         version=str(torch.__version__),
         cuda_build=cuda,
@@ -68,6 +116,13 @@ def _inspect_torch() -> Torch:
         rocm=_check_backend(torch.cuda.is_available, torch.ones, "cuda:0") if rocm else _UNAVAILABLE,
         mps=_check_backend(mps.is_available, torch.ones, "mps") if mps else _UNAVAILABLE,
     )
+    if not detailed:
+        return report
+    torch.set_num_threads(1)
+    return replace(report, **{
+        name: _measure(torch, getattr(report, name), device)
+        for name, device in (("cpu", "cpu"), ("cuda", "cuda:0"), ("rocm", "cuda:0"), ("mps", "mps"))
+    })
 
 
 def _status(value: object) -> Status:
@@ -80,7 +135,22 @@ def _status(value: object) -> Status:
 
 def _backend(value: object) -> Backend:
     if isinstance(value, dict):
-        return Backend(_status(value.get("availability")), _status(value.get("readiness")))
+        def count(key: str) -> int | None:
+            item = value.get(key)
+            return item if type(item) is int and item >= 0 else None
+
+        def choices(key: str, allowed: tuple[str, ...]) -> tuple[str, ...]:
+            items = value.get(key)
+            return tuple(item for item in allowed if item in items) if isinstance(items, list) else ()
+
+        name = value.get("device_name")
+        return Backend(
+            _status(value.get("availability")), _status(value.get("readiness")),
+            name[:200] if isinstance(name, str) and name.isprintable() else None,
+            count("free_device_bytes"), count("total_device_bytes"), count("shared_memory_limit_bytes"),
+            choices("precisions_tested", ("fp32", "fp16", "bf16")),
+            choices("operators_tested", ("nms", "roi_align_backward")),
+        )
     return Backend()
 
 
@@ -127,4 +197,4 @@ def probe_torch() -> Torch:
 
 
 if __name__ == "__main__":
-    print(_RESULT_PREFIX + json.dumps(asdict(_inspect_torch())))
+    print(_RESULT_PREFIX + json.dumps(asdict(_inspect_torch(detailed=True))))
