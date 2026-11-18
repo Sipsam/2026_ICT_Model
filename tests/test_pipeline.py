@@ -394,31 +394,33 @@ def test_dag_rejects_cycles_and_invalid_artifact_contracts(dag: MockDag) -> None
         StageRunner((replace(source, outputs=(Path("other"),)), transform), dag.root, {})
 
 
-def test_cli_production_preview_and_unavailable_adapter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_production_preview_and_missing_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     client = CliRunner()
     assert "No saved run found" in client.invoke(cli.app, ["status"]).stderr
     preview = client.invoke(cli.app, ["run", "--dry-run"])
     assert preview.exit_code == 0, preview.output
     assert [line.split()[0] for line in preview.stdout.splitlines()] == [
-        "download", "extract", "audit", "manifest", "convert", "validate_detection",
-        "train", "validate_models", "evaluate", "report",
+        "audit", "manifest", "convert", "validate_detection",
     ]
-    assert preview.stdout.count("adapter unavailable") == 6
+    assert preview.stdout.count("adapter unavailable") == 0
+    full = client.invoke(cli.app, ["run", "--from", "download", "--until", "report", "--dry-run"])
+    assert full.exit_code == 0, full.output
+    assert full.stdout.count("adapter unavailable") == 6
     assert list(tmp_path.iterdir()) == []
     result = client.invoke(cli.app, ["run", "--run-id", "production"])
     assert result.exit_code == 1
-    assert "Stage download requires an adapter" in result.stderr
+    assert "Cannot verify audit input dataset" in result.stderr
     state = client.invoke(cli.app, ["status"])
     assert state.exit_code == 0
     assert "Run production   failed" in state.stdout
-    assert "download   failed" in state.stdout
+    assert "audit   failed" in state.stdout
     assert not (tmp_path / "runs" / "production" / "artifacts").exists()
 
 
 def test_cli_partial_force_status_and_resume(dag: MockDag, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(dag.root)
-    monkeypatch.setattr(cli, "pipeline_stages", dag.stages)
+    monkeypatch.setattr(cli, "pipeline_stages", lambda **_: dag.stages())
     client = CliRunner()
     profile = dag.root / "profile.yaml"
     profile.write_text("model: rt_detr\n", encoding="utf-8")

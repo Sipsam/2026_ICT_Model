@@ -68,7 +68,7 @@ Keep the workspace and job ID to reconnect after a client or network interruptio
 3. Run `preflight` with `--workflow train --model yolo --device cuda` on the tiny generated dataset. Check that the driver, CUDA build, and requested device are reported and that `ready` is true. Use a one-epoch model YAML and a fresh job ID for a separately approved `run --approve-train`. Inspect job events and the completed checkpoint metadata. Repeat the relevant checks with `--executor docker --image <gpu-image>` if using Docker.
 4. Request CUDA on a CPU environment and verify a failed preflight before any model work begins. Test with CPU by selecting `--device cpu` and its compatible dependencies.
 
-The CI matrix runs CPU fixtures on Windows, Linux, and macOS. Docker and SSH command tests use mocks. The Linux suite also exercises the detached worker in a local process. Actual Docker daemon behavior, SSH network and host policy, CUDA, ROCm, MPS, and hosted notebook behavior require target validation.
+Run the CPU fixture suite locally and record results with the [manual platform checklist](platforms.md). Docker and SSH command tests use mocks. A Linux-only test exercises the detached worker in a local process. Docker daemon behavior, SSH network and host policy, CUDA, ROCm, MPS, and hosted notebook behavior require checks on their target environments.
 
 ## Notebook or Colab
 

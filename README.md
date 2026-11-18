@@ -4,7 +4,14 @@ The ICT Pipeline CLI is a Python entry point for the AI Hub SMT manufacturing de
 
 ## Install
 
-Use Python 3.11 or newer. From the repository root, create a virtual environment and activate it in your shell.
+Use Git and Python 3.11 or newer.
+
+```text
+git clone https://github.com/Sipsam/2026_ICT_Model.git
+cd 2026_ICT_Model
+```
+
+Create a virtual environment and activate it in your shell.
 
 ```powershell
 # Windows PowerShell
@@ -28,15 +35,40 @@ ict --version
 
 The CLI runs without PyTorch, GPU libraries, or dataset files.
 
+## First local run
+
+Use an already extracted SMT tree for an offline run. Install the preprocessing extra, run diagnostics, and point setup at the source tree. See the [data access guide](docs/data-access.md) if you need the archives or dataset access.
+
+```text
+python -m pip install -e ".[preprocess]"
+ict doctor
+ict setup --non-interactive --dataset-source skip --data-path data/extracted
+ict run --dry-run
+ict run --run-id smt
+ict status --run-id smt
+ict resume --run-id smt
+```
+
+Use the path printed on the `Detection dataset` line for training and evaluation. With a trusted completed model run for that dataset, pass its directory containing `run.json` as `--run`. If you need a checkpoint, follow [Train detection models](#train-detection-models) and use the path printed on the `Model run` line. Replace the quoted example paths with the printed values.
+
+```text
+ict evaluate --dataset "path/to/detection" --run "path/to/model-run" --device cpu
+ict report
+```
+
+The benchmark uses Validation by default. The report prints the path to its HTML file. See [troubleshooting](docs/troubleshooting.md) and the [manual platform checklist](docs/platforms.md).
+
 ## Available commands
 
 `ict --help` lists the registered commands, and `ict --version` prints the installed package version. Both exit with status `0`.
 
-`clean` is a placeholder and exits with status `1`. The rollout is described in [PLANS.md](PLANS.md).
+`clean` is a placeholder and exits with status `1`.
 
 Use `ict runtime` to run preprocessing, training, or Validation evaluation on the local machine, in Docker, or on a Linux SSH server. The [runtime guide](docs/runtime.md) covers setup, job recovery, device checks, and platform limitations.
 
 ## Acquire and verify dataset 71900
+
+Obtain dataset approval and keep the API key in an environment variable or local `.env`. See [data access](docs/data-access.md) for approval, offline reuse, and source layout.
 
 ```text
 ict data status
@@ -63,9 +95,9 @@ ict status
 ict resume --run-id <id>
 ```
 
-The production DAG declares ten stages from download through report. With `dataset_source: aihub` or `dataset_source: existing` configured, `ict run --until extract` executes the two ingestion stages. Their artifacts are `archives/` and `dataset/` under the corresponding published attempt directories. When an existing dataset is selected, the download stage records its reuse and the extract stage copies the selected files into the run artifact. For missing transfers, `ict run --until extract --approve-download` authorizes acquisition. Pass the same approval flag to `ict resume` if a resumed run still needs transfers. Training and later stage adapters are planned.
+By default, `ict run` completes preprocessing through `validate_detection`. With `dataset_source: skip`, it starts at `audit` and reads the configured extracted tree in place, defaulting to `data/extracted`. With `dataset_source: aihub` or `dataset_source: existing` it starts at `download`. Ingestion publishes `archives/` and `dataset/` under the corresponding attempt directories. If an extracted dataset is selected for ingestion, the download stage records reuse and the extract stage copies the selected files into the run artifact.
 
-With executable stages registered, `ict run` selects the entire DAG and creates a run ID. Pass `--run-id <id>` to choose a name or reuse that run's cache. `--from` and `--until` select an inclusive range in dependency order. Repeat `--only` to select individual stages. Any omitted prerequisite must have a valid result in the same run. `--force` recomputes the selection in new artifact directories.
+`ict run` and `ict resume` work with closed stdin. For missing transfers, review `ict data download` and pass `--approve-download` to authorize acquisition for that invocation. Pass the same flag to `ict resume` if transfers are still missing. Pass `--run-id <id>` to choose a name or reuse that run's cache. `--from` and `--until` select an inclusive range in dependency order. Repeat `--only` to select individual stages. Any omitted prerequisite must have a valid result in the same run. `--force` recomputes the selection in new artifact directories. The DAG reserves `train`, `validate_models`, `evaluate`, and `report`. Use the standalone commands for model work and reporting.
 
 `ict status` shows the latest recorded attempt per stage for a pipeline run. Use `--run-id <id>` to select it when training or evaluation has a newer record. `ict resume` defaults to the latest pipeline run and rechecks settings, inputs, stage versions, and artifact bytes before reuse. If you ran with `--config`, pass the same file to `resume` to use that profile again.
 
@@ -140,7 +172,7 @@ The catalog uses the pipeline ID as saved and prefixes standalone run IDs with `
 
 Local recording and reports work without MLflow. To also publish the JSON snapshot as an artifact, use the optional `ict-pipeline[mlflow]` extra, set `MLFLOW_TRACKING_URI` in the environment or `.env`, and run `ict report --mlflow --experiment-id <id>`. The flag sends the report, including run metadata and artifact paths, to the configured MLflow service. Each export creates a new MLflow run. [MLflow client API](https://mlflow.org/docs/latest/api_reference/python_api/mlflow.client.html)
 
-Python consumers can use `ict_pipeline.evaluation.contracts.Prediction` and `Predictor` for normalized, one-based detections with preprocessing metadata, and `ict_pipeline.evaluation.metrics.detection_metrics` for scoring. The report reader is `ict_pipeline.evaluation.runner.read_report`. The pipeline DAG and standalone `ict report` can consume these artifacts in a later phase.
+Python consumers can use `ict_pipeline.evaluation.contracts.Prediction` and `Predictor` for normalized, one-based detections with preprocessing metadata, and `ict_pipeline.evaluation.metrics.detection_metrics` for scoring. The report reader is `ict_pipeline.evaluation.runner.read_report`. The standalone `ict report` reads saved preprocessing, training, and evaluation records.
 
 ## Preprocess and validate detections
 
@@ -207,6 +239,8 @@ python -m pip install -e ".[test]"
 python -m pytest
 ```
 
-The tests generate tiny JPG, JSON, and XLSX fixtures in temporary directories and run without the AI Hub dataset, credentials, or a GPU.
+The tests generate tiny JPG, JSON, and XLSX fixtures in temporary directories and require no AI Hub dataset, credentials, GPU, or hosted runner. Run `python -m pytest -m e2e` for the fixture-based CLI journey. It uses local mock acquisition and model adapters with real preprocessing, checkpoint verification, evaluation scoring, and report export. Optional backend smoke tests use one tiny CPU epoch when compatible training dependencies are already installed.
 
 To opt in to the real-data regression, set `ICT_REAL_DATA_ROOT` to an already extracted AI Hub 71900 dataset and run `python -m pytest -q tests/test_preprocessing.py -k real_data_regression`. The test reads that tree and writes derived artifacts under pytest's temporary directory. It checks the historical expectations of 15,372 audited samples, 14,718 candidates, 645 holds, 9 exclusions, 13,062 Train and 1,656 Validation candidates, 16,877 boxes, and zero validation issues.
+
+See [code, dependency, and dataset licensing](docs/licenses.md) before distributing project materials.

@@ -26,6 +26,7 @@ from .pipeline import PipelineError, StageRunner
 from .pipeline.model import valid_id
 from .pipeline.runner import StageEvent
 from .pipeline.stages import pipeline_stages
+from .pipeline.store import RunState, RunStore
 from .reporting.commands import compare, report, runs_app, status
 from .runtime.commands import runtime_app
 
@@ -206,6 +207,8 @@ def _pipeline(config: Path | None, run_id: str | None, approve_download: bool = 
     credentials.protect_path(run_id, "run ID")
     values = merge_settings(files.config_text, os.environ, {})
     values.setdefault("dataset_source", "skip")
+    if values["dataset_source"] == "skip" and values.get("data_path") is None:
+        values["data_path"] = str(load_selection().extracted_root)
     settings = validate_settings(values, credentials).model_dump(exclude_none=True)
     if settings["execution_mode"] in {"docker", "remote"}:
         raise SetupError("Use ict runtime with --executor docker or --executor ssh for this execution mode.")
@@ -234,10 +237,8 @@ def _pipeline(config: Path | None, run_id: str | None, approve_download: bool = 
         )
     if data is not None:
         stages = pipeline_stages(data)
-    elif "data_path" in settings:
-        stages = pipeline_stages(dataset_root=Path(settings["data_path"]))
     else:
-        stages = pipeline_stages()
+        stages = pipeline_stages(dataset_root=Path(settings["data_path"]))
     return StageRunner(stages, root, settings, on_event=_pipeline_progress, credentials=credentials)
 
 
@@ -254,7 +255,15 @@ ConfigOption = Annotated[Path | None, typer.Option(help="Read settings from this
 ApprovalOption = Annotated[bool, typer.Option("--approve-download", help="Authorize missing AI Hub transfers.")]
 
 
-@app.command(help="Plan or execute selected pipeline stages.")
+def _print_completed(runner: StageRunner, state: RunState) -> None:
+    typer.echo(f"Run {state.run_id} completed.")
+    if "convert" in state.selection:
+        store = RunStore(runner.runs_dir, state.run_id)
+        detection = store.artifact_dir("convert", state.stages["convert"].attempt) / "detection"
+        typer.echo(f"Detection dataset   {detection}")
+
+
+@app.command(help="Prepare detection data through validation, or select specific stages.")
 def run(
     dry_run: Annotated[bool, typer.Option(help="Print the plan without writing run files.")] = False,
     start: Annotated[str | None, typer.Option("--from", help="First stage in the range.")] = None,
@@ -267,6 +276,13 @@ def run(
 ) -> None:
     try:
         runner = _pipeline(config, run_id, approve_download)
+        if not only and "validate_detection" in runner.graph.stages:
+            order = runner.graph.order
+            preparation = order[:order.index("validate_detection") + 1]
+            if start is None and runner.settings["dataset_source"] == "skip" and until not in {"download", "extract"}:
+                start = "audit"
+            if until is None and (start is None or start in preparation):
+                until = "validate_detection"
         selection = runner.graph.select(start, until, only or ())
         if dry_run:
             for step in runner.plan(selection, run_id=run_id, force=force):
@@ -275,8 +291,7 @@ def run(
         run_id = uuid4().hex if run_id is None else run_id
         if valid_id(run_id):
             typer.echo(f"Run ID   {run_id}")
-        runner.run(run_id, selection, force=force)
-        typer.echo(f"Run {run_id} completed.")
+        _print_completed(runner, runner.run(run_id, selection, force=force))
     except (PipelineError, SetupError, DataError, OSError, ValueError) as exc:
         _pipeline_failure(exc)
     except KeyboardInterrupt:
@@ -289,8 +304,8 @@ def resume(
     run_id: RunIdOption = None, config: ConfigOption = None, approve_download: ApprovalOption = False,
 ) -> None:
     try:
-        state = _pipeline(config, run_id, approve_download).resume(run_id)
-        typer.echo(f"Run {state.run_id} completed.")
+        runner = _pipeline(config, run_id, approve_download)
+        _print_completed(runner, runner.resume(run_id))
     except (PipelineError, SetupError, DataError, OSError, ValueError) as exc:
         _pipeline_failure(exc)
     except KeyboardInterrupt:
@@ -339,6 +354,7 @@ def train(
             raise TrainingError("Training requires explicit approval. Review the scope above, then pass --approve-train.")
         for name, checkpoints in execute_training(plan, progress):
             typer.echo(f"{name} completed   best {checkpoints.best}   last {checkpoints.last}")
+            typer.echo(f"Model run   {plan.destination / name}")
     except (TrainingError, SetupError, PipelineError) as exc:
         typer.echo(f"Training failed. {exc}", err=True)
         raise typer.Exit(code=1) from None
