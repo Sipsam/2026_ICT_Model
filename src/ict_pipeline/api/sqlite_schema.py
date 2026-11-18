@@ -46,6 +46,10 @@ class InspectionDatabaseError(OSError):
     """A storage error safe to display without SQLite exception details."""
 
 
+class InspectionDatabaseBusy(InspectionDatabaseError):
+    """A database lock prevented the operation from completing."""
+
+
 def check_identity(connection: Connection) -> int:
     application_id = connection.execute("PRAGMA application_id").fetchone()[0]
     version = connection.execute("PRAGMA user_version").fetchone()[0]

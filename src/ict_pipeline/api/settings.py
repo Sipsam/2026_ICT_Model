@@ -12,6 +12,7 @@ from ..inspection.contracts import CheckpointKind, Contract, Device, InspectionT
 from ..inspection.service import MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS
 from ..models.contracts import ModelName
 from ..pipeline.store import Fingerprint
+from ..streaming.settings import StreamSettings
 
 ModelID = Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")]
 
@@ -67,6 +68,7 @@ class APISettings(Contract):
     upload_timeout_seconds: float = Field(default=15.0, gt=0)
     inference_timeout_seconds: float = Field(default=30.0, gt=0)
     retention_seconds: int | None = Field(default=None, ge=1)
+    input_stream: StreamSettings | None = None
 
     @model_validator(mode="after")
     def bound_models(self) -> Self:

@@ -41,6 +41,14 @@ class InspectionError(Exception):
     """An actionable inspection error safe to display."""
 
 
+class TransientInspectionError(InspectionError):
+    """A predictor may raise this when it can safely retry an operation."""
+
+
+class InspectionInterrupted(InspectionError):
+    """The caller cancelled before entering the predictor."""
+
+
 class Contract(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid", frozen=True, hide_input_in_errors=True, allow_inf_nan=False)
 
@@ -74,14 +82,17 @@ class InspectionInput(Contract):
     sensor: SensorInput | None = None
 
 
-class InspectionRequest(InspectionInput):
-    image_path: Path
+class InspectionMetadataInput(InspectionInput):
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def check_metadata(self) -> Self:
         json.dumps(self.metadata, allow_nan=False)
         return self
+
+
+class InspectionRequest(InspectionMetadataInput):
+    image_path: Path
 
 
 class Detection(Contract):

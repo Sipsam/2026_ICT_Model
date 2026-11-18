@@ -19,6 +19,7 @@ The [inspection dashboard](inspection-dashboard.md) is available at `http://127.
 | --- | --- |
 | `GET /health` | `200` with `status: ok` when all configured models loaded, or `status: degraded` when some loaded. If none loaded, the API returns `503 model_unavailable`. |
 | `GET /v1/models` | `200` with model IDs, mock or real mode, the mock scenario or detector family, and availability. |
+| `GET /v1/sources/status` | `200` with the process-local input stream status, source health, and bounded queue metrics. The state is `disabled` when no stream is configured. |
 | `POST /v1/inspections` | `201` with a stored result and a relative `Location` header. |
 | `POST /v1/inspections/batch` | `200` with one item per upload, in upload order, including per-item status and a stored inspection or error. |
 | `GET /v1/inspections/{inspection_id}` | `200` with the stored result for a server-issued UUID. |
@@ -208,6 +209,10 @@ Real mode supports `yolo`, `faster_rcnn`, and `rt_detr` with the matching detect
 | `retention_seconds` | null, so stored records remain available indefinitely |
 
 The API has one inference worker per process and rejects work when that worker is occupied. The deadline stops waiting for the result. Native inference already in progress can continue, and the worker remains occupied until it returns. Pending batch items are skipped after cancellation. Orderly shutdown waits for the worker. Request bodies are bounded and parsed in memory, so size and concurrency limits also determine upload memory usage.
+
+## Opt-in input stream
+
+Set the server-owned `input_stream` object to start one camera and optional sensor source pair during application startup. The status route is read-only, uses the same access controls as history, and returns a version 1 snapshot even if the stream reports a failure. Status excludes local paths, camera URLs, identifiers for individual samples, and sensor measurements. Existing upload endpoints and `/health` retain their contracts. Stream results use the existing inspection record format and carry source and alignment evidence under `result.metadata.streaming`. [Input configuration and status fields](input-streaming.md)
 
 ## Storage and access controls
 

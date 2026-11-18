@@ -22,8 +22,11 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from ..config.settings import Credentials
 from ..evaluation.adapters import PredictorFactory
 from ..inspection.service import local_path
+from ..streaming.runner import StreamRunner
+from ..streaming.settings import RTSPSettings
 from .dashboard_routes import ASSETS, router as dashboard_router
 from .errors import APIError
+from .input_streams import build_stream
 from .repository import InspectionRepository
 from .routes import router
 from .services import InspectionAPI, ModelManager
@@ -123,6 +126,9 @@ def create_app(
     credentials = Credentials.load({}, os.environ)
     if token:
         credentials.add("ICT_API_TOKEN", token)
+    if settings.input_stream and isinstance(camera := settings.input_stream.camera, RTSPSettings):
+        if url := os.environ.get(camera.url_env):
+            credentials.add(camera.url_env, url)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -145,14 +151,23 @@ def create_app(
             inspections = InspectionAPI(settings, models, store, scratch)
             app.state.inspections = inspections
             app.state.inspection_image_root = image_root
+            stream = build_stream(settings, models, store, credentials)
+            app.state.input_stream = stream
             try:
+                if isinstance(stream, StreamRunner):
+                    stream.start()
                 yield
             finally:
                 try:
-                    await inspections.close()
+                    if isinstance(stream, StreamRunner) and not await run_in_threadpool(stream.close):
+                        logger.warning('{"event":"inspection_stream_shutdown_timeout"}')
                 finally:
-                    del app.state.inspections
-                    del app.state.inspection_image_root
+                    try:
+                        await inspections.close()
+                    finally:
+                        del app.state.inspections
+                        del app.state.inspection_image_root
+                        del app.state.input_stream
 
     app = FastAPI(
         title="ICT Inspection API", version="1.0.0", lifespan=lifespan, redirect_slashes=False,

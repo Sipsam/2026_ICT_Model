@@ -23,6 +23,8 @@ Each operation opens its own connection and enables foreign keys. The writable s
 
 The API stores sanitized source identifiers and checkpoint fingerprints. Use non-sensitive values for identifiers and optional metadata. Source images, checkpoint files, unprocessed sensor readings, and machine paths are unnecessary for the database record.
 
+Input streams use stable UUIDs in the existing insert-only key. Restarting an unchanged replay can reuse a retained record even while retention hides it from history. An explicitly purged record no longer provides evidence for deduplication. [Replay recovery](input-streaming.md#queue-recovery-and-status)
+
 ## Browse and export
 
 See the [API filter and response contracts](rest-api.md#history-filters-and-statistics) for the full filter list. The CLI takes shared filters before the subcommand.

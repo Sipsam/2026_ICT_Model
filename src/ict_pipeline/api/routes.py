@@ -10,6 +10,7 @@ from fastapi import APIRouter, Query, Request, Response
 from pydantic import UUID4
 from starlette.concurrency import run_in_threadpool
 
+from ..streaming.runner import StreamRunner, StreamStatus
 from .errors import APIError, ERRORS
 from .history import (
     DefectStatistics,
@@ -86,6 +87,12 @@ async def health(request: Request) -> Health:
     if status.status == "unavailable":
         raise APIError("model_unavailable")
     return status
+
+
+@router.get("/v1/sources/status", responses=AUTH_ERRORS)
+async def source_status(request: Request) -> StreamStatus:
+    stream = request.app.state.input_stream
+    return stream.status() if isinstance(stream, StreamRunner) else stream
 
 
 @router.get("/v1/models", responses=AUTH_ERRORS)

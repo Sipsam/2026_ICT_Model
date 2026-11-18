@@ -476,6 +476,29 @@ form.addEventListener("submit", event => {
   if (!state.loading && !state.exporting) applyFilters();
 });
 byId("refresh").addEventListener("click", () => void load({overview: true}));
+byId("source-refresh").addEventListener("click", async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  showNotice("source-feedback", "Checking input sources…");
+  try {
+    const status = await json("/v1/sources/status", options());
+    requirePayload(status?.schema_version === 1 && typeof status.state === "string"
+      && Array.isArray(status.sources) && isCount(status.queue_depth) && isCount(status.queue_capacity));
+    const summary = status.state === "disabled" ? "Input streaming is disabled." : [
+      "Input stream " + status.state,
+      status.mode === "mock" ? "Simulated inference" : "",
+      ...status.sources.map(source => [source.source_id, source.kind, source.state, source.last_error]
+        .filter(Boolean).join(" · ")),
+      "Queue " + integer(status.queue_depth) + " / " + integer(status.queue_capacity),
+      status.error || "",
+    ].filter(Boolean).join(". ") + ".";
+    showNotice("source-feedback", summary);
+  } catch (error) {
+    showNotice("source-feedback", errorMessage(error), true);
+  } finally {
+    button.disabled = false;
+  }
+});
 for (const name of ["order", "limit"]) {
   byId(name).addEventListener("change", () => {
     state.order = byId("order").value;

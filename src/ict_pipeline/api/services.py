@@ -14,7 +14,7 @@ from starlette.concurrency import run_in_threadpool
 
 from ..config.settings import Credentials
 from ..evaluation.adapters import PredictorFactory
-from ..inspection.contracts import InspectionInput
+from ..inspection.contracts import InspectionInput, InspectionInterrupted
 from ..inspection.service import InspectionService
 from .errors import APIError
 from .repository import InspectionRepository
@@ -100,10 +100,14 @@ class InspectionAPI:
             if isinstance(upload, APIError):
                 results.append(upload)
                 continue
-            result = service.inspect_bytes(
-                upload.details, upload.data, image_format=upload.format, max_width=self.settings.max_width,
-                max_height=self.settings.max_height, max_pixels=self.settings.max_pixels, scratch_root=self.scratch,
-            )
+            try:
+                result = service.inspect_bytes(
+                    upload.details, upload.data, image_format=upload.format, max_width=self.settings.max_width,
+                    max_height=self.settings.max_height, max_pixels=self.settings.max_pixels, scratch_root=self.scratch,
+                    cancelled=cancelled,
+                )
+            except InspectionInterrupted:
+                break
             if result.outcome == "inference_failed":
                 results.append(APIError(result.reason))
             else:

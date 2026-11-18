@@ -27,7 +27,7 @@ from .history import (
     utc_timestamp,
 )
 from .schemas import StoredInspection, decode_stored_inspection
-from .sqlite_schema import SCHEMA_VERSION, InspectionDatabaseError, check_identity, initialize_schema
+from .sqlite_schema import SCHEMA_VERSION, InspectionDatabaseBusy, InspectionDatabaseError, check_identity, initialize_schema
 
 DuplicateStatus = Literal["new", "duplicate", "conflict"]
 RECORD_COLUMNS = (
@@ -112,7 +112,7 @@ class SQLiteInspectionRepository:
                 yield connection
         except sqlite3.Error as exc:
             if getattr(exc, "sqlite_errorcode", 0) & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
-                raise InspectionDatabaseError("Inspection database is busy. Retry the operation.") from None
+                raise InspectionDatabaseBusy("Inspection database is busy. Retry the operation.") from None
             raise InspectionDatabaseError("Inspection database operation failed. Check integrity and permissions.") from None
         except OSError as exc:
             if isinstance(exc, InspectionDatabaseError):
@@ -167,6 +167,11 @@ class SQLiteInspectionRepository:
     def get(self, inspection_id: UUID) -> StoredInspection | None:
         with self._transaction() as connection:
             return self._find(connection, inspection_id, apply_retention=True)
+
+    def read_record(self, inspection_id: UUID) -> StoredInspection | None:
+        """Read a record for internal deduplication, including retained expired IDs."""
+        with self._transaction() as connection:
+            return self._find(connection, inspection_id)
 
     def import_record(self, record: StoredInspection, *, dry_run: bool = False) -> DuplicateStatus:
         """Classify or insert a source record. Expired IDs still participate in deduplication."""

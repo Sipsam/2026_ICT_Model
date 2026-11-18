@@ -2,13 +2,13 @@
 
 import hashlib
 import re
-from collections.abc import Callable
-from contextlib import redirect_stderr, redirect_stdout
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from io import BytesIO, StringIO
 from pathlib import Path
 from shutil import copyfile
 from tempfile import TemporaryDirectory
-from threading import Lock
+from threading import Event, Lock
 from typing import Literal, Protocol, cast
 
 from ..config.settings import Credentials, SetupError, is_filesystem_path
@@ -21,8 +21,9 @@ from ..models.contracts import ModelName
 from ..models.dataset import Sample
 from ..pipeline.store import fingerprint_path
 from .contracts import (
-    CheckpointKind, Detection, Device, Failure, ImageSource, InspectionError, InspectionInput, InspectionRequest,
-    InspectionResult, InspectionThresholds, MockScenario, ModelProvenance,
+    CheckpointKind, Detection, Device, Failure, ImageSource, InspectionError, InspectionInput, InspectionInterrupted,
+    InspectionMetadataInput, InspectionRequest,
+    InspectionResult, InspectionThresholds, MockScenario, ModelProvenance, TransientInspectionError,
 )
 
 MAX_IMAGE_BYTES = 64 * 1024**2
@@ -30,6 +31,24 @@ MAX_IMAGE_PIXELS = 25_000_000
 SOURCE_IDS = {name: category for category, name in TARGET_IDS.items()}
 # The shared loader and adapter diagnostics use process-wide streams.
 _BACKEND_LOCK = Lock()
+
+
+@contextmanager
+def _use_backend(cancelled: Event | None) -> Iterator[None]:
+    if cancelled is None:
+        with _BACKEND_LOCK:
+            yield
+        return
+    while not cancelled.is_set():
+        if _BACKEND_LOCK.acquire(timeout=0.05):
+            try:
+                if cancelled.is_set():
+                    break
+                yield
+                return
+            finally:
+                _BACKEND_LOCK.release()
+    raise InspectionInterrupted("Inspection was cancelled before inference.")
 
 
 class ImageError(Exception):
@@ -221,7 +240,7 @@ class InspectionService:
                 source_id=self.credentials.redact_text(request.source_id),
                 sensor_source_id=self.credentials.redact_text(request.sensor.source_id) if request.sensor else None,
             )
-            if isinstance(request, InspectionRequest):
+            if isinstance(request, InspectionMetadataInput):
                 context["metadata"] = self.credentials.redact(request.metadata)
         return context
 
@@ -248,7 +267,8 @@ class InspectionService:
 
     def inspect_bytes(
         self, request: InspectionInput, data: bytes, *, image_format: Literal["JPEG", "PNG"],
-        max_width: int, max_height: int, max_pixels: int, scratch_root: Path,
+        max_width: int, max_height: int, max_pixels: int, scratch_root: Path | None = None,
+        propagate_transient: bool = False, cancelled: Event | None = None,
     ) -> InspectionResult:
         """Inspect uploaded bytes without accepting a caller-supplied file path."""
         context = self._context(request, None)
@@ -259,12 +279,13 @@ class InspectionService:
                                   max_height=max_height, max_pixels=max_pixels)
         except ImageError as exc:
             return InspectionResult(outcome="inference_failed", reason=exc.reason, **context)
-        return self._predict_image(request, image, data, context, scratch_root=scratch_root)
+        return self._predict_image(request, image, data, context, scratch_root=scratch_root,
+                                   propagate_transient=propagate_transient, cancelled=cancelled)
 
     def _predict_image(
         self, request: InspectionInput, image: ImageSource, data: bytes, context: dict[str, object],
         *, reuse: Callable[[ImageSource], InspectionResult | None] | None = None,
-        scratch_root: Path | None = None,
+        scratch_root: Path | None = None, propagate_transient: bool = False, cancelled: Event | None = None,
     ) -> InspectionResult:
         context["image"] = image
         if request.expected_size and (image.width, image.height) != (request.expected_size.width, request.expected_size.height):
@@ -280,10 +301,18 @@ class InspectionService:
                 snapshot = Path(directory) / f"image.{extension}"
                 snapshot.write_bytes(data)
                 sample = Sample(snapshot, image.width, image.height, ())
-                with _BACKEND_LOCK, redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                with _use_backend(cancelled), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
                     prediction = self._predictor.predict(sample)
                     self._predictor.synchronize()
                 detections = _detections(prediction, sample, self.thresholds)
+        except InspectionInterrupted:
+            if cancelled is not None and cancelled.is_set():
+                raise
+            return InspectionResult(outcome="inference_failed", reason="prediction_failed", **context)
+        except TransientInspectionError:
+            if propagate_transient:
+                raise TransientInspectionError("Inspection backend requested a retry.") from None
+            return InspectionResult(outcome="inference_failed", reason="prediction_failed", **context)
         except Exception:
             return InspectionResult(outcome="inference_failed", reason="prediction_failed", **context)
 

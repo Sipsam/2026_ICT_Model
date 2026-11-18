@@ -224,6 +224,10 @@ ict history import-files outputs/legacy-inspections --dry-run
 
 The history commands work without starting inference. See the [inspection database guide](docs/inspection-database.md) for storage setup, migration, backup, restore, and retention.
 
+## Replay camera and sensor inputs
+
+Set `input_stream` in the JSON file selected by `ICT_API_CONFIG` to run an image-directory replay with an optional CSV or JSON sensor snapshot. Select a mock model to test ordering, sample alignment, backpressure, and persistence on CPU. The stream writes to the same inspection history as HTTP uploads, and rerunning the same replay skips committed records. Use **Input sources → Check source status** in the dashboard or query `GET /v1/sources/status`. Streaming defaults to disabled. USB and RTSP require explicit device settings and an existing OpenCV installation. [Replay example, alignment rules, and device limits](docs/input-streaming.md)
+
 ## Inspect runs and export local reports
 
 ```text

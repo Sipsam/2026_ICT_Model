@@ -32,6 +32,7 @@ from ict_pipeline.models.contracts import ModelName
 from ict_pipeline.models.dataset import Sample
 from ict_pipeline.evaluation.contracts import Prediction
 from ict_pipeline.pipeline.store import fingerprint_path
+from ict_pipeline.streaming.settings import AlignmentSettings, DirectorySettings, StreamSettings
 
 from test_inspection import AdapterFixture, make_run
 from test_inspection_database import connect, inspection
@@ -76,6 +77,48 @@ def assert_error(response: Response, status: int, code: str) -> None:
     assert body["request_id"] == response.headers["X-Request-ID"]
     assert body["error"]["code"] == code and body["error"]["message"]
     assert response.headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.parametrize("backend", ["file", "sqlite"])
+def test_opt_in_source_status_and_replay_share_api_history(
+    settings: APISettings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
+) -> None:
+    path = "/v1/sources/status"
+    with client_for(create_app(settings)) as client:
+        disabled = client.get(path)
+        assert disabled.status_code == 200 and disabled.json()["state"] == "disabled"
+    private_input = tmp_path / "private-replay-input"
+    private_input.mkdir()
+    (private_input / "confidential-item.png").write_bytes(image_bytes())
+    token = "test-api-token-with-more-than-thirty-characters"
+    monkeypatch.setenv("ICT_API_TOKEN", token)
+    headers = {"Authorization": f"Bearer {token}"}
+    settings = settings.model_copy(update={
+        "storage_backend": backend,
+        "input_stream": StreamSettings(
+            stream_id="local-replay", model_id="mock-defect",
+            camera=DirectorySettings(source_id="replay-camera", directory=private_input),
+            alignment=AlignmentSettings(allow_image_only=True),
+        ),
+    })
+    for outcome in ("persisted", "reused"):
+        app = create_app(settings)
+        with client_for(app) as client:
+            assert app.state.input_stream.wait(5)
+            assert_error(client.get(path), 401, "unauthorized")
+            info = client.get(path, headers=headers)
+            assert info.status_code == 200
+            assert info.headers["Cache-Control"] == "no-store"
+            assert str(private_input) not in info.text and "confidential" not in info.text and token not in info.text
+            assert info.json()["state"] == "completed" and info.json()["mode"] == "mock"
+            assert info.json()["counters"][outcome] == 1
+            history = client.get(SINGLE, params={"mode": "mock"}, headers=headers).json()
+            assert history["total"] == 1
+            [record] = history["items"]
+            assert record["result"]["metadata"]["streaming"]["camera"]["kind"] == "directory"
+            reply = client.get(f"{SINGLE}/{record['inspection_id']}", headers=headers)
+            assert reply.json() == record
+    assert (private_input / "confidential-item.png").read_bytes() == image_bytes()
 
 
 @pytest.mark.parametrize("backend", ["file", "sqlite"])

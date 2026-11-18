@@ -22,6 +22,7 @@ The default model catalog includes `mock-empty` and `mock-defect`. Submit a loca
 - Use **Rows**, **Sort**, **Previous**, and **Next** to page through history. Equal timestamps are ordered by inspection UUID. JSON and CSV buttons export the current filtered page from the server. Use `ict history export` for a full export. The JSON export and detail view preserve both schema versions.
 - Select **View** on a record to see its outcome, reason, identifiers, image descriptor, detection coordinates, thresholds, and available model and checkpoint provenance. Expand **View versioned JSON** for the complete stored record. Use Tab to move through controls and Escape to close the detail dialog. When the image is available, focusing a detection highlights its box.
 - **Refresh data** reruns the applied query. Auto-refresh defaults to Off and can run every 1, 2, or 5 minutes while the tab is visible and no detail or export is open. The same date range remains active across refreshes.
+- **Input sources → Check source status** requests one snapshot of the configured stream, current queue depth, and source health. It uses the applied API token and has no polling timer. Replay records carry alignment evidence under **View versioned JSON**. [Input streaming](input-streaming.md)
 
 ## Original images
 
