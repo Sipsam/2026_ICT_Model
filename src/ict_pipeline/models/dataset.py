@@ -93,17 +93,23 @@ def read_coco_split(root: Path, split: str) -> Split:
         raise ValueError
 
     objects: dict[int, list[Object]] = defaultdict(list)
-    for row in data["annotations"]:
-        category = row["category_id"]
-        image = images[row["image_id"]]
-        x, y, w, h = map(float, row["bbox"])
-        if (
-            type(category) is not int or category not in range(1, len(NAMES) + 1) or row.get("iscrowd", 0) != 0
-            or not all(math.isfinite(value) for value in (x, y, w, h))
-            or not (0 <= x and 0 <= y and w > 0 and h > 0
-                    and x + w <= image["width"] + 1e-6 and y + h <= image["height"] + 1e-6)
-        ):
-            raise ValueError
+    for index, row in enumerate(data["annotations"]):
+        try:
+            category = row["category_id"]
+            image = images[row["image_id"]]
+            box = row["bbox"]
+            if not isinstance(box, list) or any(type(value) not in (int, float) for value in box):
+                raise ValueError
+            x, y, w, h = map(float, box)
+            if (
+                type(category) is not int or category not in range(1, len(NAMES) + 1) or row.get("iscrowd", 0) != 0
+                or not all(math.isfinite(value) for value in (x, y, w, h))
+                or not (0 <= x < min(image["width"], x + w) and 0 <= y < min(image["height"], y + h)
+                        and x + w <= image["width"] + 1e-6 and y + h <= image["height"] + 1e-6)
+            ):
+                raise ValueError
+        except (KeyError, ValueError, TypeError, OverflowError):
+            raise TrainingError(f"Invalid COCO annotation at index {index} in {split}. Rerun conversion validation.") from None
         objects[row["image_id"]].append(Object(category, (x, y, w, h)))
 
     samples = []

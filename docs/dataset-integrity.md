@@ -51,6 +51,8 @@ After reviewing a dry run, repeat the chosen command with `--publish --out <fres
 
 Changing a sealed image, label file, split revision, or label policy invalidates the corresponding selection. Unsealed legacy checkpoints remain supported through their available recorded split and label fingerprints. Incomplete historical records carry less provenance than a sealed revision.
 
+`ict training-data imbalance` joins the published manifest to the converted annotation counts and reports support by split, manufacturer and group. Train-only balancing leaves split assignments intact. Keep Test closed during ablation planning and tuning. [Class counts and Train cohort selection](training-optimization.md)
+
 ## Verification
 
 Run the fixture and optional local regression tests with the existing environment:

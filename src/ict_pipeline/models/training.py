@@ -9,7 +9,7 @@ from contextlib import ExitStack
 from dataclasses import asdict, dataclass, field, replace
 from hashlib import sha256
 from importlib import import_module
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 from importlib.resources import files
 from pathlib import Path
 from shutil import copyfile
@@ -36,6 +36,7 @@ from ..training_storage import (
 )
 from .contracts import Checkpoints, ModelAdapter, ModelName, Progress, TrainConfig, TrainingError, TrainingRequest
 from .dataset import DetectionData, inspect_data, verify_shared_labels
+from .optimization.sampling import cohort_record, select_train
 from .registry import REGISTRY, failure_message, resolve_device
 from .weights import VerifiedWeights, checkpoint_source, verify_weights, weight_libraries, weight_packages
 
@@ -98,11 +99,61 @@ ADAPTIVE_PREDECESSORS = ({
 
 ADAPTIVE_FIELDS = {"workers", "gradient_accumulation"}
 
+# Exact pre-optimization adapter sources in the repository and Windows checkout.
+_OPTIMIZATION_LF = {
+    "coco.py": "a1aeba9bb2a5c5bc6ef436c315718698aa65446ec0d5db87b45776272f14d066",
+    "training.py": "d25c151ed8bb39cf354b6b07f66b0bb3beb4b3e51e99663079b05c5243fbb924",
+    "dataset.py": "1d60f56d2336f6e60454bafccfe360ae097d1f9afeead5152367c8a57b8a989b",
+    "contracts.py": "1418d4181c1be7607c3d06f515522ce6dac8dc2d31c749cac0a0c90b2b6eec5b",
+    "yolo.py": "408bd2198240d1d2378ae362177becdd2c51bc2e2be9f0671f575d6cb973e98c",
+}
+_OPTIMIZATION_CRLF = {
+    "coco.py": "decf0194be22c6788a2aabdc39dbcf72e8c771bd3bc6487168e9510abcc577c3",
+    "training.py": "e7a6de8b344127ef32dfb3b5c8ae7e0a48f01e1f22173e561035b542d30390f7",
+    "dataset.py": "68315b721272b8b658d0759e7a40e33271cb560005374e520dc1f449f1baf91b",
+    "contracts.py": "206daa0b6bbf0815d5e12acaa6e7967765b9fe6963551eac23288752db1667dd",
+    "yolo.py": "4ed00aa0545b619c22bf63eb8fc3ff65057f459041d9cb8b85d5197ae19710d1",
+}
+_OPTIMIZATION_PREDECESSORS = (
+    _OPTIMIZATION_LF, _OPTIMIZATION_CRLF,
+    {**_OPTIMIZATION_LF, **{key: _OPTIMIZATION_CRLF[key] for key in ("contracts.py", "yolo.py")}},
+)
+_PREVIOUS_DATASET_CODES = tuple(
+    {"dataset.py": source["dataset.py"]} for source in (_OPTIMIZATION_LF, _OPTIMIZATION_CRLF)
+)
+
 
 def compatible_predecessors(config: TrainConfig) -> tuple[dict[str, str], ...]:
+    if config.optimization is not None:
+        return ()
     if config.workers == 0 and config.gradient_accumulation == 1:
-        return (*STORAGE_PREDECESSORS, *ADAPTIVE_PREDECESSORS)
-    return ()
+        return (*_OPTIMIZATION_PREDECESSORS, *(
+            {**dataset_code, **changes} for changes in (*STORAGE_PREDECESSORS, *ADAPTIVE_PREDECESSORS)
+            for dataset_code in _PREVIOUS_DATASET_CODES
+        ))
+    return _OPTIMIZATION_PREDECESSORS
+
+
+def training_configuration(config: TrainConfig, predecessor: Mapping[str, str] | None = None) -> dict[str, object]:
+    excluded = {"optimization"} if config.optimization is None else set()
+    if predecessor and predecessor not in _OPTIMIZATION_PREDECESSORS:
+        excluded.update(ADAPTIVE_FIELDS)
+    return config.model_dump(mode="json", exclude=excluded)
+
+
+def training_code(config: TrainConfig) -> dict[str, str]:
+    root = Path(__file__).parent
+    sources = {path.name: fingerprint_path(path) for path in root.glob("*.py")}
+    if config.optimization is not None:
+        for name in ("config.py", "augmentation.py", "sampling.py"):
+            sources[f"optimization/{name}"] = fingerprint_path(root / "optimization" / name)
+    return sources
+
+
+def training_packages(name: ModelName, config: TrainConfig) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(
+        REGISTRY[name].libraries + weight_packages(config) + (("Pillow",) if config.optimization is not None else ())
+    ))
 
 
 @dataclass(frozen=True)
@@ -122,7 +173,13 @@ class TrainingPlan:
 
 
 def _validate_adapter_options(name: ModelName, config: TrainConfig, device: str) -> None:
+    if config.device != "auto" and config.device not in REGISTRY[name].devices:
+        raise TrainingError("This adapter does not support the requested device. Use CPU or a supported GPU backend.")
+    if config.precision != "fp32" and device in ("cpu", "mps"):
+        raise TrainingError("Mixed precision requires CUDA or ROCm.")
     if name == ModelName.YOLO:
+        if config.precision == "bf16":
+            raise TrainingError("YOLO supports fp32 and fp16 precision.")
         if config.gradient_accumulation != 1:
             raise TrainingError("YOLO uses its native accumulation schedule. Remove gradient_accumulation.")
         if config.workers and device in ("cpu", "mps"):
@@ -188,6 +245,11 @@ def plan_training(
         source = dataset / REGISTRY[name].data_format
         if not source.is_dir() or not source.resolve().is_relative_to(dataset):
             raise TrainingError("Generated detection data is missing. Pass --dataset with the detection conversion directory.")
+        coco = dataset / "coco"
+        if models[name].optimization is not None and (
+            not coco.is_dir() or not coco.resolve().is_relative_to(dataset)
+        ):
+            raise TrainingError("Controlled training requires the generated COCO annotations.")
     return TrainingPlan(models, dataset, destination, resume_from, credentials, workspace, weight_sources=weights)
 
 
@@ -239,12 +301,10 @@ def execute_training(plan: TrainingPlan, progress: Progress) -> Iterator[tuple[M
     plan.destination.mkdir(parents=True, exist_ok=False)
     store = RunStore(plan.destination.parent, plan.destination.name, plan.credentials)
     configuration = {
-        "models": {name.value: config.model_dump(mode="json") for name, config in plan.models.items()},
+        "models": {name.value: training_configuration(config) for name, config in plan.models.items()},
         "dataset": str(plan.dataset), "resume_from": str(plan.resume_from) if plan.resume_from else None,
     }
-    packages = tuple(
-        package for name, config in plan.models.items() for package in REGISTRY[name].libraries + weight_packages(config)
-    )
+    packages = tuple(package for name, config in plan.models.items() for package in training_packages(name, config))
     with store.lock(), ExitStack() as attempt:
         attempt.enter_context(track_attempt(
             store, plan.workspace, "training", configuration, packages, (TrainingError, SetupError, PipelineError),
@@ -258,6 +318,7 @@ def execute_training(plan: TrainingPlan, progress: Progress) -> Iterator[tuple[M
 
 def _execute_training(plan: TrainingPlan, progress: Progress) -> Iterator[tuple[ModelName, Checkpoints]]:
     datasets = dict(plan.verified_data or {})
+    controlled = any(config.optimization is not None for config in plan.models.values())
     try:
         seal = read_dataset_seal(plan.dataset)
     except ValueError as exc:
@@ -273,12 +334,19 @@ def _execute_training(plan: TrainingPlan, progress: Progress) -> Iterator[tuple[
         for data_format in ("yolo", "coco"):
             if data_format not in datasets:
                 datasets[data_format] = inspect_data(plan.dataset, data_format, plan.credentials, progress)
-        if plan.verified_data is None and seal is None:
+        if (plan.verified_data is None and seal is None) or controlled:
             verify_shared_labels(datasets["yolo"], datasets["coco"])
+    if controlled and "coco" not in datasets:
+        datasets["coco"] = inspect_data(plan.dataset, "coco", plan.credentials, progress)
     runtimes = {}
     for name, config in plan.models.items():
         backend = REGISTRY[name]
         library_versions = backend.versions()
+        if config.optimization is not None and "Pillow" not in library_versions:
+            try:
+                library_versions["Pillow"] = version("Pillow")
+            except PackageNotFoundError:
+                raise TrainingError("Controlled training requires Pillow in the training environment.") from None
         weights = verify_weights(name, config, plan.weight_sources.get(name), library_versions)
         try:
             torch = import_module("torch")
@@ -301,25 +369,25 @@ def _execute_training(plan: TrainingPlan, progress: Progress) -> Iterator[tuple[
     if any(value != fingerprints[0] for value in fingerprints):
         raise TrainingError("YOLO and COCO Train/Validation images differ. Rerun conversion and detection validation.")
 
-    code = {source.name: fingerprint_path(source) for source in Path(__file__).parent.glob("*.py")}
     for name, config in plan.models.items():
         device, library_versions, adapter, weights = runtimes[name]
+        optimization_data = datasets["coco"] if config.optimization is not None else None
         yield name, _train_model(
-            name, config, plan, datasets[REGISTRY[name].data_format], device, library_versions, adapter, code, progress,
-            weights,
+            name, config, plan, datasets[REGISTRY[name].data_format], device, library_versions, adapter,
+            training_code(config), progress, weights, optimization_data,
         )
 
 
 def _train_model(
     name: ModelName, config: TrainConfig, plan: TrainingPlan, data: DetectionData, device: str,
     library_versions: dict[str, str], adapter: ModelAdapter, code: dict[str, str], progress: Progress,
-    weights: VerifiedWeights | None,
+    weights: VerifiedWeights | None, optimization_data: DetectionData | None = None,
 ) -> Checkpoints:
     backend = REGISTRY[name]
     output = plan.destination / name
     metadata: dict[str, object] = {
         "schema_version": 1, "model": name, "architecture": adapter.architecture,
-        "configuration": config.model_dump(mode="json"), "device": device,
+        "configuration": training_configuration(config), "device": device,
         "dataset_format": backend.data_format, "split_fingerprints": data.split_fingerprints,
         "annotation_fingerprint": data.annotation_fingerprint, "label_policy": label_policy(),
         "split_annotation_fingerprints": data.split_annotation_fingerprints,
@@ -330,17 +398,27 @@ def _train_model(
     }
     if plan.dataset_revision is not None:
         metadata.update(dataset_revision=plan.dataset_revision, profile_fingerprint=plan.profile_fingerprint)
+    cohort = None
+    if config.optimization is not None:
+        assert optimization_data is not None
+        train = optimization_data.splits["train"].samples
+        cohort = select_train(train, config.optimization.balancing, config.seed)
+        metadata["train_cohort"] = cohort_record(train, cohort)
+        metadata["optimization_source_annotations"] = optimization_data.split_annotation_fingerprints["train"]
     resume_fingerprints = set()
-    legacy_options = config.workers == 0 and config.gradient_accumulation == 1
+    legacy_options = config.optimization is None and config.workers == 0 and config.gradient_accumulation == 1
     if weights is None and legacy_options:
         old_config = config.model_dump(exclude={
-            "initialization", "checkpoint", "freeze_backbone", "fine_tuning", *ADAPTIVE_FIELDS,
+            "initialization", "checkpoint", "freeze_backbone", "fine_tuning", "optimization", *ADAPTIVE_FIELDS,
         })
         old_code = {key: value for key, value in code.items() if key != "weights.py"}
-        for changes in _LEGACY_SCRATCH_CHANGES:
-            resume_fingerprints.add(digest_json({
-                **metadata, "configuration": old_config, "code_fingerprints": {**old_code, **changes},
-            }))
+        resume_fingerprints.update(
+            digest_json({
+                **metadata, "configuration": old_config,
+                "code_fingerprints": {**old_code, **dataset_code, **changes},
+            })
+            for changes in _LEGACY_SCRATCH_CHANGES for dataset_code in _PREVIOUS_DATASET_CODES
+        )
     if weights is not None:
         metadata["pretrained_weights"] = {
             **weights.spec.model_dump(mode="json"), "source_classes": weights.source_classes,
@@ -348,10 +426,10 @@ def _train_model(
         }
     metadata["initialization_mode"] = config.initialization
     run_fingerprint = digest_json(metadata)
-    if plan.resume_from and legacy_options:
-        old_metadata = {**metadata, "configuration": config.model_dump(exclude=ADAPTIVE_FIELDS)}
+    if plan.resume_from:
         resume_fingerprints.update(
-            digest_json({**old_metadata, "code_fingerprints": {**code, **changes}})
+            digest_json({**metadata, "configuration": training_configuration(config, changes),
+                         "code_fingerprints": {**code, **changes}})
             for changes in compatible_predecessors(config)
         )
     resume_fingerprints.add(run_fingerprint)
@@ -364,7 +442,7 @@ def _train_model(
     output.mkdir(parents=True, exist_ok=False)
     started = monotonic()
     checkpoints = checkpoint_paths(name, output)
-    verified_resume = plan.dataset_revision is not None or weights is not None
+    verified_resume = plan.dataset_revision is not None or weights is not None or cohort is not None
     store = RunStore(output.parent, name, plan.credentials)
     scratch = cache_root(plan) if name == ModelName.YOLO else None
     resources: dict[str, object] = {}
@@ -442,6 +520,7 @@ def _train_model(
                     result = adapter.train(TrainingRequest(
                         config, data, output, device, report, resume, record_metrics, weights, record_transfer,
                         scratch, check_checkpoint_space, record_overhead if plan.monitor_resources else None,
+                        train_cohort=cohort,
                     ))
             if result != checkpoints or len(_records(output, result)) != 2:
                 raise TrainingError("Training did not produce both best and last checkpoints.")

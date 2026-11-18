@@ -253,6 +253,29 @@ def mocked_training(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, str]]:
     return seen
 
 
+def test_training_imbalance_joins_sealed_groups(published: Path) -> None:
+    dataset = published / "detection"
+    runner = CliRunner()
+    args = ["training-data", "imbalance", "--dataset", str(dataset)]
+    result = runner.invoke(app, args)
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.stdout)
+    assert report["manifest_verified_by_seal"] and report["test_available"]
+    assert "test" not in report["splits"]
+    train, val = (report["splits"][split] for split in ("train", "val"))
+    assert set(train["by_group"]).isdisjoint(val["by_group"])
+    assert "A" in train["by_manufacturer"]
+    audit = runner.invoke(app, [*args, "--include-test"])
+    assert audit.exit_code == 0, audit.output
+    test = json.loads(audit.stdout)["splits"]["test"]
+    assert set(test["by_group"]).isdisjoint(set(train["by_group"]) | set(val["by_group"]))
+    manifest = published / "manifest.csv"
+    with manifest.open("a", encoding="utf-8") as stream:
+        stream.write("wrong,data\n")
+    rejected = runner.invoke(app, args)
+    assert rejected.exit_code == 2 and "differs from the selected split" in rejected.stderr
+
+
 def test_training_preflight_binds_revision_and_rejects_tampering(
     published: Path, mocked_training: list[dict[str, str]],
 ) -> None:

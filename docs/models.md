@@ -2,6 +2,8 @@
 
 Omitting `initialization` uses `scratch`. The packaged profiles specify that mode explicitly. To fine-tune, put a checkpoint from a provider you trust in a local cache outside the dataset and pipeline runs directories. Stage the file only after approval for any large download, and obtain its full SHA-256 from trusted publisher metadata or an independently verified copy. ICT reads the file from disk and performs no checkpoint downloads.
 
+The optional `optimization` section selects deterministic SMT augmentation and a reproducible Train-only sampling policy on all three detectors. Use `optimization: {}` as the controlled ablation baseline. The configuration, cohort fingerprint, and source annotation provenance are recorded with the run. Changing the policy requires a fresh run. [SMT profiles, previews, and ablations](training-optimization.md)
+
 ## Supported checkpoint layouts
 
 | Model YAML | Architecture | Published checkpoint | Format | Class-dependent tensors initialized for SMT |

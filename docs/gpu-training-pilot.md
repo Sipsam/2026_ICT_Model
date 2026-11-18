@@ -51,6 +51,8 @@ Each execution creates a fresh `attempts/<id>/`. The atomic `pilot.json` records
 
 ## Use the measurements
 
+Use `ict training-data ablation --dry-run` for an offline comparison plan with pinned checkpoints and a shared Validation protocol. Pilot hardware findings can inform a detector's common base profile. Keep those settings fixed across that detector's ablation variants. [Controlled training experiments](training-optimization.md)
+
 - The pilot summary includes preparation, adapter and Validation wall times, per-epoch training and native Validation metrics, and the shared Validation report path and metrics. Per-model `run.json` contains checkpoint hashes, transfer diagnostics, package versions, and code fingerprints.
 - RAM is sampled process RSS at 100 ms intervals for the main process. CUDA and ROCm peaks describe the PyTorch allocator on the selected device. MPS allocation is sampled. Missing measurements are null or absent. Process reuse and other activity can affect measurements.
 - Loader wait is host time blocked obtaining batches. Batch preparation is the adapter's timed host-side work and may overlap GPU transfers; Faster R-CNN's internal model transforms remain in model wall time. YOLO also reports loader setup, private input copy time, and generated cache bytes. Checkpoint logical sizes count each filename, even when best and last share storage.

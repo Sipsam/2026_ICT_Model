@@ -10,9 +10,11 @@ from typing import TYPE_CHECKING, Literal, Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .optimization.config import Optimization
+
 
 if TYPE_CHECKING:
-    from .dataset import DetectionData
+    from .dataset import DetectionData, Sample
     from .weights import VerifiedWeights
 
 
@@ -78,6 +80,7 @@ class TrainConfig(BaseModel):
     fine_tuning: FineTuningConfig | None = None
     workers: int = Field(default=0, ge=0)
     gradient_accumulation: int = Field(default=1, ge=1)
+    optimization: Optimization | None = None
 
     @model_validator(mode="after")
     def check_initialization(self) -> Self:
@@ -116,6 +119,7 @@ class TrainingRequest:
     cache_root: Path | None = None
     check_checkpoint_space: Callable[[], None] = lambda: None
     record_overhead: Callable[[str, float], None] | None = None
+    train_cohort: tuple[Sample, ...] | None = None
 
 
 class ModelAdapter(Protocol):

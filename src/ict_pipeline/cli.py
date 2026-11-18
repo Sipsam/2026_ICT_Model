@@ -26,6 +26,7 @@ from .environment.model import EnvironmentReport
 from .evaluation.contracts import EvaluationConfig, EvaluationError, EvaluationSplit
 from .inspection.commands import inspect_command
 from .models.contracts import ModelName, TrainingError
+from .models.optimization.commands import training_data_app
 from .pipeline import PipelineError, StageRunner
 from .pipeline.detection import DETECTION_STAGES, DetectionStages
 from .pipeline.model import valid_id
@@ -51,6 +52,7 @@ app.add_typer(runs_app, name="runs")
 app.add_typer(runtime_app, name="runtime")
 app.add_typer(pilot_app, name="pilot")
 app.add_typer(history_app, name="history")
+app.add_typer(training_data_app, name="training-data")
 app.command("recommend")(recommend_command)
 app.command("inspect")(inspect_command)
 app.command()(status)
@@ -472,7 +474,7 @@ def train(
     dry_run: Annotated[bool, typer.Option(help="Preview the selected configs and output paths.")] = False,
 ) -> None:
     from .models.registry import REGISTRY
-    from .models.training import execute_training, plan_training
+    from .models.training import execute_training, plan_training, training_configuration
     from .models.weights import training_scope
     from .training_storage import storage_estimates
 
@@ -494,7 +496,7 @@ def train(
         plan = plan_training(Path.cwd(), names, dataset, runs_dir, config_dir, resume_from)
         for name, config in plan.models.items():
             typer.echo(f"{name}   input {plan.dataset / REGISTRY[name].data_format}   output {plan.destination / name}")
-            typer.echo(config.model_dump_json())
+            typer.echo(json.dumps(training_configuration(config)))
             typer.echo(plan.credentials.redact_text(json.dumps(training_scope(name, config, plan.weight_sources.get(name)))))
         for estimate in storage_estimates(plan):
             typer.echo(plan.credentials.redact_text(json.dumps({"storage": asdict(estimate)})))

@@ -167,6 +167,8 @@ Use `ict train --dry-run` with the model and dataset options to see measured fre
 
 The Python entry points are `ict_pipeline.models.contracts.ModelAdapter`, `TrainingRequest`, and `Checkpoints`, and `ict_pipeline.models.registry.REGISTRY`. The stage runner uses the same training implementation.
 
+Use `ict training-data imbalance` for class support by split, manufacturer, and group. Use `ict training-data preview` to inspect Train-only SMT transforms and `ict training-data ablation --dry-run` to validate a pending pretrained comparison. The same opt-in YAML settings work with `ict train` and `ict run`. [Training optimization and experiment planning](docs/training-optimization.md)
+
 ## Evaluate and compare detectors
 
 ```text

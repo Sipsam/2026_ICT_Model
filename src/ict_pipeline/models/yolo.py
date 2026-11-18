@@ -3,6 +3,7 @@
 import math
 import os
 from collections.abc import Iterator
+from io import BytesIO
 from numbers import Real
 from pathlib import Path
 from shutil import copyfile
@@ -15,6 +16,7 @@ from unittest.mock import patch
 from ..data.preprocessing.policy import NAMES
 from ..training_storage import commit_checkpoint, guard_training_write
 from .contracts import Checkpoints, TrainingError, TrainingRequest
+from .optimization.augmentation import augment, read_rgb
 from .weights import LAYOUTS, load_weights, transfer_state
 
 
@@ -38,6 +40,39 @@ class TimedLoader:
             started = perf_counter()
 
 
+def stage_controlled_train(request: TrainingRequest, directory: Path) -> None:
+    """Materialize the shared Train view without editing source-linked files."""
+    policy, cohort = request.config.optimization, request.train_cohort
+    if policy is None or cohort is None:
+        raise TrainingError("Controlled YOLO training requires a verified Train cohort.")
+    images, labels = (directory / kind / "train" for kind in ("images", "labels"))
+    images.mkdir(parents=True)
+    labels.mkdir(parents=True)
+    request.progress("stage controlled YOLO Train", 0, len(cohort))
+    for index, sample in enumerate(cohort, 1):
+        image = read_rgb(sample)
+        if policy.augmentation is not None:
+            image, sample, _ = augment(image, sample, policy.augmentation, request.config.seed)
+        # Use the same lossless staging for all controlled variants, including baseline.
+        # Format each occurrence independently so native enumeration keeps repetitions.
+        image.info.clear()
+        encoded = BytesIO()
+        image.save(encoded, format="PNG", compress_level=1)
+        targets = []
+        for obj in sample.objects:
+            x, y, w, h = obj.box
+            box = ((x + w / 2) / sample.width, (y + h / 2) / sample.height, w / sample.width, h / sample.height)
+            targets.append(f"{obj.category - 1} " + " ".join(f"{value:.12g}" for value in box) + "\n")
+        annotations = "".join(targets).encode("ascii")
+        guard_training_write(directory, encoded.getbuffer().nbytes + len(annotations))
+        stem = f"{index:08d}"
+        with (images / f"{stem}.png").open("xb") as stream:
+            stream.write(encoded.getbuffer())
+        with (labels / f"{stem}.txt").open("xb") as stream:
+            stream.write(annotations)
+        request.progress("stage controlled YOLO Train", index, len(cohort))
+
+
 class YoloAdapter:
     architecture = LAYOUTS["yolo"].architecture
 
@@ -50,9 +85,15 @@ class YoloAdapter:
 
     def _train_with_copy(self, request: TrainingRequest, directory: Path) -> Checkpoints:
         started = perf_counter()
-        total = sum(len(split.images) for split in request.data.splits.values())
+        copies = {
+            name: split for name, split in request.data.splits.items()
+            if name == "val" or (name == "train" and request.config.optimization is None)
+        }
+        if request.config.optimization is not None:
+            stage_controlled_train(request, directory)
+        total = sum(len(split.images) for split in copies.values())
         copied = 0
-        for name, split in request.data.splits.items():
+        for name, split in copies.items():
             images = directory / "images" / name
             labels = directory / "labels" / name
             images.mkdir(parents=True)
@@ -100,6 +141,20 @@ class YoloAdapter:
             raise TrainingError("The installed Ultralytics package is missing its YOLO11 architecture definition.")
 
         class OfflineTrainer(DetectionTrainer):
+            def build_dataset(self, img_path: str, mode: str = "train", batch: int | None = None) -> Any:
+                if mode != "train" or cfg.optimization is None:
+                    return super().build_dataset(img_path, mode, batch)
+                from ultralytics.data.dataset import YOLODataset
+                from ultralytics.utils.torch_utils import unwrap_model
+
+                # The validation-style transforms omit even Albumentations plugins.
+                stride = max(int(unwrap_model(self.model).stride.max()), 32)
+                return YOLODataset(
+                    img_path=img_path, imgsz=self.args.imgsz, batch_size=batch, augment=False,
+                    hyp=self.args, rect=False, stride=stride, pad=0.0, prefix="train: ",
+                    task="detect", data=self.data,
+                )
+
             def get_dataloader(
                 self, dataset_path: str, batch_size: int = 16, rank: int = 0, mode: str = "train",
             ) -> Any:
@@ -201,6 +256,8 @@ class YoloAdapter:
         # device and precision have already been checked, so skip that probe.
         fine_tuning = cfg.fine_tuning
         overrides = {}
+        if cfg.optimization is not None:
+            overrides.update(mosaic=0.0, close_mosaic=0)
         if fine_tuning:
             overrides.update({
                 key: value for key, value in (("weight_decay", fine_tuning.weight_decay), ("momentum", fine_tuning.momentum))

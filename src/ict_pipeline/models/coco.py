@@ -13,6 +13,8 @@ from ..data.preprocessing.policy import NAMES
 from ..training_storage import commit_checkpoint, guard_training_write
 from .contracts import Checkpoints, TrainConfig, TrainingError, TrainingRequest
 from .dataset import Sample
+from .optimization.augmentation import augment, read_rgb
+from .optimization.config import Augmentation
 from .weights import LAYOUTS, load_weights, transfer_state
 
 if TYPE_CHECKING:
@@ -22,20 +24,32 @@ Batch = tuple[list[Any], list[Sample]]
 
 
 class CocoImages:
-    def __init__(self, samples: tuple[Sample, ...]) -> None:
+    def __init__(
+        self, samples: tuple[Sample, ...], augmentation: Augmentation | None = None, seed: int = 0,
+    ) -> None:
         self.samples = samples
+        self.augmentation = augmentation
+        self.seed = seed
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, index: int) -> tuple[Any, Sample]:
-        from PIL import Image
-
         sample = self.samples[index]
-        with Image.open(sample.image) as image:
-            if image.size != (sample.width, sample.height):
-                raise TrainingError("COCO image dimensions differ from the encoded image. Rerun detection validation.")
-            return image.convert("RGB"), sample
+        image = read_rgb(sample)
+        if self.augmentation is not None:
+            image, sample, _ = augment(image, sample, self.augmentation, self.seed)
+        return image, sample
+
+
+def coco_training_datasets(request: TrainingRequest) -> tuple[CocoImages, CocoImages]:
+    train, val = (request.data.splits[split].samples for split in ("train", "val"))
+    policy = request.config.optimization
+    if policy is None:
+        return CocoImages(train), CocoImages(val)
+    if request.train_cohort is None:
+        raise TrainingError("Controlled training requires a verified Train cohort.")
+    return CocoImages(request.train_cohort, policy.augmentation, request.config.seed), CocoImages(val)
 
 
 def collate(items: list[tuple[Any, Sample]]) -> Batch:
@@ -115,10 +129,10 @@ class CocoAdapter:
         generator = torch.Generator()
         train, val = (
             DataLoader(
-                CocoImages(request.data.splits[split].samples), batch_size=cfg.batch_size,
+                dataset, batch_size=cfg.batch_size,
                 shuffle=split == "train", generator=generator, collate_fn=collate, num_workers=cfg.workers,
             )
-            for split in ("train", "val")
+            for split, dataset in zip(("train", "val"), coco_training_datasets(request), strict=True)
         )
         checkpoints = Checkpoints(request.output / "best.pt", request.output / "last.pt")
         start, best_epoch, best_loss = 0, 0, float("inf")

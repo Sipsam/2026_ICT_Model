@@ -78,9 +78,22 @@ def storage_estimates(plan: "TrainingPlan") -> tuple[StorageEstimate, ...]:
         copies = 2 + (2 if name == ModelName.YOLO else 1) + periodic + 2 * plan.publish_checkpoints
         checkpoints += copies * unit
         if name == ModelName.YOLO:
+            splits = ("train", "val") if config.optimization is None else ("val",)
             for kind in ("images", "labels"):
                 dataset_bytes += sum(path.stat().st_size for path in (plan.dataset / "yolo" / kind).rglob("*")
-                                     if path.is_file() and path.parent.name in ("train", "val"))
+                                     if path.is_file() and path.parent.name in splits)
+            if config.optimization is not None:
+                from .models.dataset import read_coco_split
+                from .models.optimization.sampling import select_train
+
+                try:
+                    train = read_coco_split(plan.dataset / "coco", "train").samples
+                except (OSError, ValueError, TypeError, KeyError):
+                    raise TrainingError("Cannot estimate YOLO staging space. Check the generated COCO Train labels.") from None
+                cohort = select_train(train, config.optimization.balancing, config.seed)
+                # Conservatively allow for lossless RGB PNG, label text and file overhead.
+                dataset_bytes += sum(4 * sample.width * sample.height + 8192 + 100 * len(sample.objects)
+                                     for sample in cohort)
             # Ultralytics caches labels and metadata beside the private copy.
             cache_bytes = max(16 * MIB, dataset_bytes // 10)
     try:

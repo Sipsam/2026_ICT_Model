@@ -164,7 +164,7 @@ def test_transfer_checks_explicit_legacy_tensor_renames(tmp_path: Path) -> None:
     assert torch.equal(model.weight, source["legacy.weight"])
 
 
-@pytest.mark.parametrize("mode", ["legacy_scratch", "pre_storage", "pre_adaptive", "pretrained"])
+@pytest.mark.parametrize("mode", ["legacy_scratch", "pre_storage", "pre_adaptive", "pre_optimization", "pretrained"])
 def test_revision_bound_resume_with_legacy_scratch_compatibility(
     detection: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
 ) -> None:
@@ -201,16 +201,21 @@ def test_revision_bound_resume_with_legacy_scratch_compatibility(
     if mode != "pretrained":
         path = previous / "run.json"
         metadata = json.loads(path.read_text())
-        for key in ("workers", "gradient_accumulation"):
-            del metadata["configuration"][key]
+        if mode != "pre_optimization":
+            for key in ("workers", "gradient_accumulation"):
+                del metadata["configuration"][key]
+        metadata["code_fingerprints"].update(training._PREVIOUS_DATASET_CODES[0])
         if mode == "legacy_scratch":
             for key in ("initialization", "checkpoint", "fine_tuning", "freeze_backbone"):
                 del metadata["configuration"][key]
             del metadata["code_fingerprints"]["weights.py"]
             metadata["code_fingerprints"].update(training._LEGACY_SCRATCH_CHANGES[1])
         else:
-            predecessors = (training.STORAGE_PREDECESSORS if mode == "pre_storage"
-                            else training.ADAPTIVE_PREDECESSORS)
+            predecessors = {
+                "pre_storage": training.STORAGE_PREDECESSORS,
+                "pre_adaptive": training.ADAPTIVE_PREDECESSORS,
+                "pre_optimization": training._OPTIMIZATION_PREDECESSORS,
+            }[mode]
             metadata["code_fingerprints"].update(predecessors[-1])
             contract_keys += ("pretrained_weights", "initialization_mode")
         metadata["run_fingerprint"] = digest_json({key: metadata[key] for key in contract_keys})

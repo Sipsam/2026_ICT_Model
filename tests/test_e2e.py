@@ -563,7 +563,9 @@ def test_detection_dag_fresh_full_run_and_force_recovery(
         journey.root, Credentials(), (ModelName.YOLO,), config, EvaluationConfig(image_size=64),
         False, lambda _: None,
     )
-    previous_revision = detectors.model_revision(ModelName.YOLO, training.ADAPTIVE_PREDECESSORS[-1])
+    predecessor = next(changes for changes in training.compatible_predecessors(detectors.profiles[ModelName.YOLO][0])
+                       if changes["training.py"] == training.ADAPTIVE_PREDECESSORS[-1]["training.py"])
+    previous_revision = detectors.model_revision(ModelName.YOLO, predecessor)
     previous_root = folder / digest_json([record["dataset_revision"], ModelName.YOLO, previous_revision, None])
     record_path.parents[2].rename(previous_root)
     command("resume", "--run-id", "fresh", approve, contains="Detector checkpoints")

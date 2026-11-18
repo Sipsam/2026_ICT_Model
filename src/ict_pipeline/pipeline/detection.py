@@ -24,9 +24,10 @@ from ..models.contracts import ModelName, Progress, TrainConfig, TrainingError
 from ..models.dataset import Split, inspect_data
 from ..models.registry import REGISTRY
 from ..models.training import (
-    ADAPTIVE_FIELDS, TrainingPlan, checkpoint_paths, compatible_predecessors, execute_training, read_training_profile,
+    TrainingPlan, checkpoint_paths, compatible_predecessors, execute_training, read_training_profile,
+    training_code, training_configuration, training_packages,
 )
-from ..models.weights import checkpoint_source, training_scope, verify_weights, weight_packages
+from ..models.weights import checkpoint_source, training_scope, verify_weights
 from ..reporting.export import ReportFormat, report_document, write_report_file
 from ..training_storage import commit_checkpoint, guard_training_write
 from .model import StageContext, StageFailure, StageResult
@@ -93,21 +94,18 @@ class DetectionStages:
             for name, (config, fingerprint) in self.profiles.items():
                 self.show_scope(self.credentials.redact_text(
                     f"Detector {name}   input {dataset}   output {output}   YAML SHA-256 {fingerprint}\n"
-                    f"{config.model_dump_json()}\n"
+                    f"{json.dumps(training_configuration(config))}\n"
                     f"{json.dumps(training_scope(name, config, self.weight_sources.get(name)))}"
                 ))
 
     def model_revision(self, name: ModelName, predecessor: Mapping[str, str] | None = None) -> str:
         config, fingerprint = self.profiles[name]
-        code = {
-            path.name: fingerprint_path(path)
-            for path in sorted((Path(__file__).parents[1] / "models").glob("*.py"))
-        }
+        code = training_code(config)
         return digest_json({
-            "config": config.model_dump(mode="json", exclude=ADAPTIVE_FIELDS if predecessor else None),
+            "config": training_configuration(config, predecessor),
             "profile": fingerprint,
             "runtime": [platform.python_version(), platform.system(), platform.machine()],
-            "packages": _package_versions(REGISTRY[name].libraries + weight_packages(config)),
+            "packages": _package_versions(training_packages(name, config)),
             "code": {**code, **(predecessor or {})},
         })
 
