@@ -304,6 +304,14 @@ The audit reports verified JPG/JSON/XLSX relationships, split and source coverag
 
 Python callers can pass these batches to the multimodal architecture for CPU forward checks. It provides an MLP sensor encoder, an optional GRU for verified multi-step windows, RGB and Faster R-CNN feature adapters, and late, concatenation, and gated fusion. Product risk scores carry branch and weight status. Original detector boxes can accompany those scores. The architecture ships with untrained heads and no measured accuracy. [Multimodal architecture, inference and checkpoint interfaces](docs/multimodal-architecture.md)
 
+## Plan PyTorch sensor and fusion training
+
+```text
+ict multimodal train --config sensor-mlp.yaml --out runs/product/sensor-mlp --dry-run
+```
+
+The product runner supports sensor MLP, guarded GRU, RGB-only product classification, and paired late, concat, or gated fusion. Profiles pin a sealed revision and frozen Train preprocessing. Optional frozen Validation produces product presence metrics. Checkpoint selection can use the final epoch or a predeclared Validation metric. Training and resume require a separate `--approve-train` invocation. The dry run reports pending status and resource readiness without writing an experiment. [Profiles, checkpoint recovery, and execution order](docs/multimodal-training.md)
+
 ## Sensor and image-level classification
 
 Use the preprocessing dependencies for JPG and XLSX decoding. The classification models run on CPU with no pretrained weights. Put this configuration in a file such as `classification.yaml` and point `data_path` at the extracted dataset.

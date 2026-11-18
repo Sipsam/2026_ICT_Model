@@ -1,6 +1,7 @@
 """Evaluate frozen Validation predictions and compare like-for-like experiment reports."""
 
 import json
+import math
 import os
 import platform
 from collections.abc import Iterable, Mapping
@@ -21,7 +22,7 @@ from ..models.dataset import Object, Sample
 from ..models.registry import REGISTRY
 from ..multimodal.model_config import FusionConfig
 from ..pipeline.store import digest_json, fingerprint_path
-from .contracts import EvaluationError, Prediction, validate_predictions
+from .contracts import CLASSES, EvaluationError, Prediction, validate_predictions
 from .metrics import detection_metrics
 from .product_protocol import (
     ClassificationMetric, DetectionProtocol, DetectorExperimentModel, ExperimentReport, FrozenValidation,
@@ -93,11 +94,30 @@ def pending_experiment(
     )
 
 
+def classification_metrics(
+    cohort: FrozenValidation, protocol: ProductProtocol, scores: Mapping[str, tuple[float, ...]],
+) -> tuple[ClassificationMetric, ...]:
+    """Score canonical probability vectors against a frozen Validation identity."""
+    if protocol.cohort != cohort.identity or scores.keys() != set(protocol.cohort.sample_ids):
+        raise ValueError("Scores must cover exactly the frozen Validation cohort.")
+    names = ("any_target_defect",) if protocol.target_policy == "smt-target-defect-presence-v1" else tuple(
+        CLASSES.values()
+    )
+    if any(len(row) != len(names) or any(not math.isfinite(score) or not 0 <= score <= 1 for score in row)
+           for row in scores.values()):
+        raise ValueError("Use finite probabilities in canonical target order for every Validation sample.")
+    rows = [(sample.labels(protocol.target_policy), scores[sample.sample_id]) for sample in cohort.samples]
+    return tuple(_metric(name, ((truth[i], score[i]) for truth, score in rows), protocol.threshold)
+                 for i, name in enumerate(names))
+
+
 def evaluate_products(
     experiment_id: str, cohort: FrozenValidation, protocol: ProductProtocol, branch: Modality,
     records: Iterable[InspectionResult], *, fusion: FusionConfig | None = None,
 ) -> ExperimentReport:
     """Require exact branch coverage and input identity before calculating any metrics."""
+    if protocol.alignment_policy != "verified_receipt_at_capture-v1":
+        raise ValueError("Inspection records require the capture-time Validation protocol.")
     if protocol.cohort != cohort.identity:
         raise ValueError("The evaluation protocol differs from the frozen Validation cohort.")
     predictions: dict[str, tuple[InspectionResult, ProductInspection]] = {}
@@ -128,11 +148,9 @@ def evaluate_products(
     if status == "measured":
         truths = [sample.labels(protocol.target_policy) for sample in cohort.samples]
         if any(label is not None for truth in truths for label in truth):
-            metrics = tuple(
-                _metric(score.name, ((truth[index], row.scores[index].score)
-                                     for truth, row in zip(truths, ordered, strict=True)), protocol.threshold)
-                for index, score in enumerate(first.scores)
-            )
+            metrics = classification_metrics(cohort, protocol, {
+                row.sample_id: tuple(score.score for score in row.scores) for row in ordered
+            })
         else:
             status = "unscorable"
     return ExperimentReport(

@@ -116,7 +116,7 @@ architecture fingerprint, window preprocessing fingerprint when supplied,
 and caller-declared status of the selected weights. Sensor-only inference
 produces no boxes. A row with neither usable input has an empty score list.
 
-## State and future experiments
+## State and training
 
 The inspection coordinator calls `MultimodalModel.predict` with label-free
 `ProductInput` instances built from verified evidence. It preserves the
@@ -140,19 +140,15 @@ frozen preprocessing fingerprint, and loads tensors with
 `torch.load(weights_only=True)`. The FPN variant also requires a compatible
 detector object to reconstruct its backbone and image transform. Save the
 FP32 architecture state after moving from mixed precision if needed.
-`WeightStatus` defaults to untrained and can record a future runner's
-declaration per branch. A late-fusion pair requires a trained declaration
+`WeightStatus` defaults to untrained. The product runner records the trained
+branch after an epoch completes. A late-fusion pair requires a trained declaration
 for both unimodal heads. Accuracy and calibration still require validation.
 
-Expose masked binary cross-entropy for each unimodal head and the paired
-path. `OptimizerConfig` declares AdamW learning rate and weight decay for
-a future runner. Future work can fit the sensor and
-image heads independently on eligible Train views, then fit the paired head
-or fine-tune the encoders with a recorded freeze policy. Compare variants on
-the same paired Validation cohort and report coverage and metrics separately
-for image-only and sensor-only fallback. Select thresholds and fit any
-calibration under a recorded protocol with independent validation data.
-Report product-level metrics separately from detector AP. Reserve internal
-Test for a future evaluation after choices are frozen. Temporal experiments
-require multiple observed timestamps and verified decision-time ingestion
-latency. Model accuracy and calibration remain unverified.
+The runner reuses masked binary cross-entropy and the existing
+`OptimizerConfig` for AdamW. Train a unimodal or paired RGB/sensor arm per
+profile and compare on the same frozen paired Validation cohort. Selection
+and training status are recorded in the checkpoint and run manifest.
+Temporal experiments require multiple observed timestamps in the frozen
+window. Capture-time use also requires verified ingestion latency. Product
+metrics, calibration, and native GPU fitting remain unverified.
+[Product training profiles and checkpoints](multimodal-training.md)

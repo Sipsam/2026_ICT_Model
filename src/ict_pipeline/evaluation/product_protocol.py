@@ -126,7 +126,9 @@ class ProductProtocol(Contract):
     image_preprocessing_fingerprint: Fingerprint
     threshold: Probability = 0.5
     missing_modality_policy: Literal["require_requested_branch-v1"] = "require_requested_branch-v1"
-    alignment_policy: Literal["verified_receipt_at_capture-v1"] = "verified_receipt_at_capture-v1"
+    alignment_policy: Literal[
+        "verified_receipt_at_capture-v1", "audited_pair_decision_window-v1",
+    ] = "verified_receipt_at_capture-v1"
 
 
 class DetectionProtocol(Contract):

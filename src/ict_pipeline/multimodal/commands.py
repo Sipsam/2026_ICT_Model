@@ -1,4 +1,4 @@
-"""Read-only multimodal audit entry point."""
+"""Multimodal audit and approval-gated training entry points."""
 
 import json
 import os
@@ -7,14 +7,18 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+import yaml
 
 from ..config.settings import Credentials, SetupError
 from ..config.storage import SetupFiles
 from ..data.preprocessing.common import require_separate_output, write_json
 from ..data.preprocessing.console import console_progress, fresh_output, protect_source_data
+from ..disk import StorageError
+from ..models.contracts import TrainingError
+from ..pipeline.model import PipelineError
 from .audit import audit_cohort, audit_report
 
-multimodal_app = typer.Typer(no_args_is_help=True, help="Inspect and prepare SMT image and sensor data.")
+multimodal_app = typer.Typer(no_args_is_help=True, help="Prepare SMT data and run approved product training.")
 
 
 @multimodal_app.command("audit")
@@ -68,4 +72,69 @@ def audit(
         raise typer.Exit(2) from None
     except (ValueError, OSError, SetupError) as exc:
         typer.echo(credentials.redact_text(f"Multimodal audit failed. {exc}"), err=True)
+        raise typer.Exit(2) from None
+
+
+@multimodal_app.command("train")
+def train(
+    config: Annotated[Path, typer.Option(help="JSON or YAML product training profile.")],
+    out: Annotated[Path, typer.Option(help="Fresh run directory, or the existing run when resuming.")],
+    dry_run: Annotated[bool, typer.Option(help="Validate inputs and print a pending experiment and preflight.")] = False,
+    resume: Annotated[bool, typer.Option(help="Recover the same run from its latest committed epoch.")] = False,
+    approve_train: Annotated[bool, typer.Option("--approve-train", help="Authorize product optimizer execution.")] = False,
+) -> None:
+    """Plan an SMT product experiment or execute it with explicit training approval."""
+    from .training import execute_training, inspect_recovery
+    from .training_plan import ProductTrainingConfig, plan_training, preflight
+
+    credentials = Credentials()
+    try:
+        workspace = Path.cwd()
+        credentials = SetupFiles.read(workspace, None).credentials(os.environ)
+        for path in (config, out):
+            credentials.protect_path(str(path.resolve()), "Product training path")
+        raw = config.read_text(encoding="utf-8-sig")
+        credentials.protect_path(raw, "Product training profile")
+        try:
+            profile = ProductTrainingConfig.model_validate_json(json.dumps(yaml.safe_load(raw), allow_nan=False))
+        except (yaml.YAMLError, TypeError):
+            raise ValueError("Use a valid JSON or YAML product training profile.") from None
+        plan = plan_training(
+            profile, out, workspace=workspace, progress=console_progress("Verify product source bytes", file=sys.stderr),
+        )
+        credentials.protect_path(json.dumps(plan.manifest), "Resolved product training profile")
+        if dry_run or not approve_train:
+            receipts = inspect_recovery(plan, resume=resume)
+            readiness = preflight(plan, remaining_epochs=profile.epochs - len(receipts))
+            typer.echo(json.dumps(credentials.redact({
+                **plan.manifest, "output": str(plan.output), "completed_epochs": len(receipts),
+                "experiment_status": "pending", "compatibility": plan.compatibility, "preflight": readiness,
+            }), indent=2, allow_nan=False))
+            if not dry_run:
+                raise TrainingError("Review the scope above and pass --approve-train to execute.")
+            if not readiness["ready"]:
+                raise typer.Exit(1)
+            return
+        typer.echo(credentials.redact_text(json.dumps({
+            "output": str(plan.output), "branch": profile.branch, "epochs": profile.epochs,
+            "device": profile.device, "revision_id": profile.revision_id,
+            "checkpoint_policy": profile.checkpoint_policy, "samples": plan.manifest["samples"],
+        })), err=True)
+        result = execute_training(
+            plan, approved=approve_train, resume=resume, credentials=credentials,
+            progress=lambda stage: console_progress(stage, file=sys.stderr),
+        )
+        typer.echo(credentials.redact_text(str(result)))
+    except typer.Exit:
+        raise
+    except KeyboardInterrupt:
+        raise typer.Exit(130) from None
+    except (ValueError, OSError, SetupError, StorageError, PipelineError, TrainingError) as exc:
+        typer.echo(credentials.redact_text(f"Product training failed. {exc}"), err=True)
+        raise typer.Exit(2) from None
+    except ImportError:
+        typer.echo("Product training requires an installed PyTorch and Pillow runtime.", err=True)
+        raise typer.Exit(2) from None
+    except (RuntimeError, KeyError, TypeError, IndexError):
+        typer.echo("Product training failed. Check the input contracts and the active stage in run.json.", err=True)
         raise typer.Exit(2) from None

@@ -168,6 +168,8 @@ source-unit statistics.
 | `collate` | Keeps RGB images ragged and pads sensor sequences right with zeros to the longest window. It returns observation masks `[B,T,5]`, timestep validity `[B,T]`, unpadded lengths `[B]`, and image/sensor presence flags `[B,2]`. Zero values in padded or masked positions have false validity. A batch shares a split and preprocessing fingerprint. |
 | `Batch.sensor_tensors()` | With an existing PyTorch installation, returns CPU float64 sensor values, Boolean masks, and int64 lengths. All-image batches have a zero-length sensor axis. The default data API uses Python floats, Boolean masks, and no tensor dependency. |
 
+For training, have the data custodian audit the exact sealed revision, export `Cohort.for_product_training()`, and save a matching Train state. The training index retains Test integrity metadata with the readings and labels removed. The product planner checks the revision, cohort and state fingerprints and constructs only the requested Train and frozen Validation views. [Product training preparation](multimodal-training.md)
+
 The cohort includes only verified AI Hub sensor windows for model-facing
 views. The Python product models consume these batches and the frozen
 preprocessing fingerprint. Live sensor integration and performance evaluation

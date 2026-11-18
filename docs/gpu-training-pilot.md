@@ -58,6 +58,10 @@ Use `ict training-data ablation --dry-run` for an offline comparison plan with p
 - Loader wait is host time blocked obtaining batches. Batch preparation is the adapter's timed host-side work and may overlap GPU transfers; Faster R-CNN's internal model transforms remain in model wall time. YOLO also reports loader setup, private input copy time, and generated cache bytes. Checkpoint logical sizes count each filename, even when best and last share storage.
 - The next-settings record keeps the measured pilot settings or reduces the batch when the observed peak approaches the available budget. Recheck representative image sizes, box sizes, group coverage and longer-run throughput before increasing workload. Estimating production accuracy calls for a separately designed benchmark.
 
+## Product model pilots
+
+Use `ict multimodal train --dry-run` on the intended product execution host. It uses the existing operator and resource probes and checks the selected revision, frozen preprocessing, branch, and output volume. Start with a reviewed development cohort and a short fixed-epoch sensor MLP or RGB pilot after explicit approval. Compare the paired arms only after that pilot verifies finite losses, checkpoint publication, reload, and recovery on the target. Product CPU and accelerator checks here cover fixture contracts. Native fitting and accelerator performance remain pending. [Product runner and approval commands](multimodal-training.md)
+
 ## Verification
 
 Run the lightweight suite before using the existing CPU backend fixtures. Real SMT training still requires explicit approval, and the real GPU acceptance case is an opt-in pilot on the selected target. Review free disk before running real backend cases. [Managed pytest artifacts and storage checks](artifact-management.md)

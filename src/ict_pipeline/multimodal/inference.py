@@ -20,6 +20,7 @@ from .inference_contracts import (
     MockProductModel, PairingReceipt, PairingRegistry, ProductInspectionInput, ProductModelSpec,
     capture_instant, causal_sequence, sequence_fingerprint,
 )
+from .model_config import image_preprocessing_fingerprint
 from .preprocessing import WINDOW_POLICY, PreprocessingState, transform_sensor
 
 if TYPE_CHECKING:
@@ -103,10 +104,9 @@ class MultimodalInference:
                 checkpoint_format=FORMAT, checkpoint_sha256=spec.checkpoint_sha256,
                 architecture_version=config.schema_version, architecture_fingerprint=model.architecture_fingerprint,
                 image_encoder=config.image.kind, image_encoder_version=config.image.schema_version,
-                image_preprocessing_fingerprint=digest_json([
-                    "encoded-image-rgb-v1", config.image.kind, config.image.schema_version,
-                    config.image.grid_size if config.image.kind == "rgb_grid" else model.image_encoder.input_contract,
-                ]),
+                image_preprocessing_fingerprint=image_preprocessing_fingerprint(
+                    config.image, model.image_encoder.input_contract,
+                ),
                 sensor_encoder=config.sensor.kind, sensor_encoder_version=config.sensor.schema_version,
                 preprocessing_version=state.schema_version, preprocessing_fingerprint=state.fingerprint,
                 window_policy=state.config.window_policy, fusion=config.fusion.kind,

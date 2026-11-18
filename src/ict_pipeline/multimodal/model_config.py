@@ -85,9 +85,16 @@ class WeightStatus(Contract):
 
 
 class OptimizerConfig(Contract):
-    """Declarative settings for future callers that own the training loop."""
+    """Declarative AdamW settings for product training."""
 
     schema_version: SchemaVersion = 1
     algorithm: Literal["adamw"] = "adamw"
     learning_rate: float = Field(default=1e-3, gt=0)
     weight_decay: float = Field(default=1e-4, ge=0)
+
+
+def image_preprocessing_fingerprint(config: ImageEncoderConfig, input_contract: dict[str, object]) -> str:
+    return digest_json([
+        "encoded-image-rgb-v1", config.kind, config.schema_version,
+        config.grid_size if config.kind == "rgb_grid" else input_contract,
+    ])

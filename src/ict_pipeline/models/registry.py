@@ -56,24 +56,31 @@ REGISTRY: dict[ModelName, Backend] = {
 
 
 def resolve_device(torch: ModuleType, config: TrainConfig, backend: Backend) -> str:
-    if config.device != "auto" and config.device not in backend.devices:
+    return resolve_torch_device(torch, config.device, backend.devices, precision=config.precision,
+                                supports_bf16=backend.data_format != "yolo")
+
+
+def resolve_torch_device(
+    torch: ModuleType, requested: str, devices: tuple[str, ...], *,
+    precision: str = "fp32", supports_bf16: bool = True,
+) -> str:
+    if requested != "auto" and requested not in devices:
         raise TrainingError("This adapter does not support the requested device. Use CPU or a supported GPU backend.")
     cuda = torch.cuda.is_available() and torch.cuda.device_count() > 0
     gpu = "rocm" if torch.version.hip else "cuda"
     mps = torch.backends.mps.is_available()
-    requested = config.device
     if requested == "auto":
-        requested = gpu if cuda and gpu in backend.devices else "cpu"
-        if requested == "cpu" and mps and "mps" in backend.devices and config.precision == "fp32":
+        requested = gpu if cuda and gpu in devices else "cpu"
+        if requested == "cpu" and mps and "mps" in devices and precision == "fp32":
             requested = "mps"
     if requested in ("cuda", "rocm") and (not cuda or requested != gpu):
         raise TrainingError(f"{requested.upper()} is unavailable in this PyTorch build. Run ict doctor or use device: cpu.")
     if requested == "mps" and not mps:
         raise TrainingError("MPS is unavailable in this PyTorch build. Run ict doctor or use device: cpu.")
-    if config.precision != "fp32" and requested not in ("cuda", "rocm"):
+    if precision != "fp32" and requested not in ("cuda", "rocm"):
         raise TrainingError("Mixed precision requires CUDA or ROCm. Set precision: fp32 for CPU or MPS.")
-    if config.precision == "bf16":
-        if backend.data_format == "yolo":
+    if precision == "bf16":
+        if not supports_bf16:
             raise TrainingError("This YOLO backend supports fp32 and fp16. Select one of those precisions.")
         if not torch.cuda.is_bf16_supported(including_emulation=False):
             raise TrainingError("This GPU lacks native BF16 support. Use fp32 or fp16.")

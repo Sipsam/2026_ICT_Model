@@ -86,6 +86,7 @@ class MultimodalDataset:
         self, cohort: Cohort, root: Path, split: Split, *, mode: Mode,
         preprocessing: PreprocessingState | None = None, missing: MissingModality = "drop",
         augmentation: Augmentation | None = None, seed: int = 42,
+        sample_ids: frozenset[str] | None = None,
     ) -> None:
         if split not in ("train", "validation", "test") or mode not in ("image", "sensor", "paired"):
             raise ValueError("Use a supported split and modality view.")
@@ -103,7 +104,8 @@ class MultimodalDataset:
         self.seed = seed
         selected = []
         for record in cohort.records:
-            if record.split != split or not eligible(record):
+            if (record.split != split or not eligible(record)
+                    or (sample_ids is not None and record.sample_id not in sample_ids)):
                 continue
             availability = []
             if mode != "sensor":
@@ -115,6 +117,8 @@ class MultimodalDataset:
             if all(availability) or (missing == "preserve" and any(availability)):
                 selected.append(record)
         self.records = tuple(selected)
+        if sample_ids is not None and {record.sample_id for record in self.records} != sample_ids:
+            raise ValueError("The selected IDs must all be usable in the requested split and modality view.")
 
     def __len__(self) -> int:
         return len(self.records)

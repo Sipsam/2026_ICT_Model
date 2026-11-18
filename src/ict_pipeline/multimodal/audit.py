@@ -39,6 +39,16 @@ class Cohort(Contract):
     def fingerprint(self) -> str:
         return digest_json(self.model_dump(mode="json"))
 
+    def for_product_training(self) -> "Cohort":
+        """Retain Test integrity metadata without distributing readings or labels."""
+        return self.model_copy(update={"records": tuple(
+            record.model_copy(update={
+                "sequence": None, "targets": None, "alignment": "unmatched", "alignment_method": None,
+                "capture_timestamp": None, "image_id": None, "sensor_image_id": None,
+            }) if record.split == "test" else record
+            for record in self.records
+        )})
+
     @classmethod
     def load(cls, path: Path) -> "Cohort":
         saved = json.loads(path.read_text(encoding="utf-8"))
