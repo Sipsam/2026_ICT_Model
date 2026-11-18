@@ -286,6 +286,33 @@ def test_dataset_views_and_deterministic_variable_length_batches(tmp_path: Path)
         _ = mixed[0]
 
 
+def test_product_model_accepts_real_dataset_views_on_synthetic_files(tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    from ict_pipeline.multimodal.model import MultimodalModel, product_targets
+    from ict_pipeline.multimodal.model_config import ArchitectureConfig, SensorEncoderConfig
+
+    root = tmp_path / "source"
+    rows = (_sample(root, 1, values=(None, 6)), _sample(root, 2, normal=True),
+            _sample(root, 3, split="validation"))
+    cohort = audit_cohort(root, _manifest(tmp_path / "manifest.csv", *rows))
+    state = fit_preprocessor(cohort, PreprocessingConfig(scaling="standard", missing="train_median"))
+    config = ArchitectureConfig(preprocessing_fingerprint=state.fingerprint,
+                                sensor=SensorEncoderConfig(features="statistics"))
+    model = MultimodalModel(config, state).eval()
+    for mode in ("image", "sensor", "paired"):
+        dataset = MultimodalDataset(cohort, root, "train", mode=mode, preprocessing=state)
+        batch = collate(tuple(dataset[index] for index in range(len(dataset))))
+        assert product_targets(batch, config).values.tolist() == [[1], [0]]
+        output = model(batch)
+        assert output.split == "train"
+        assert tuple(item.branch for item in model.predict(batch)) == (mode, mode)
+        if mode != "image":
+            assert batch.lengths == (1, 1)
+            assert not batch.sensor_observed[0][0][0]
+    dataset = MultimodalDataset(cohort, root, "validation", mode="paired", preprocessing=state)
+    assert model(collate((dataset[0],))).split == "validation"
+
+
 def test_cli_audit_and_resumable_index(tmp_path: Path) -> None:
     root = tmp_path / "source"
     rows = (_sample(root, 1), _sample(root, 2))

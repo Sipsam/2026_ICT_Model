@@ -294,6 +294,8 @@ ict multimodal audit --root data/extracted --manifest data/processed/manifest.cs
 
 The audit reports verified JPG/JSON/XLSX relationships, split and source coverage, missing measurements, and channel statistics without fitting a model. Use `--out <fresh-directory> --export-index` to prepare a portable cohort for image, sensor, and paired dataset views. Sensor preprocessing uses frozen Train statistics and a capture-time window by default. [Source schema, measured coverage, and Python examples](docs/multimodal-data.md)
 
+Python callers can pass these batches to the multimodal architecture for CPU forward checks. It provides an MLP sensor encoder, an optional GRU for verified multi-step windows, RGB and Faster R-CNN feature adapters, and late, concatenation, and gated fusion. Product risk scores carry branch and weight status. Original detector boxes can accompany those scores. The architecture ships with untrained heads and no measured accuracy. [Multimodal architecture, inference and checkpoint interfaces](docs/multimodal-architecture.md)
+
 ## Sensor and image-level classification
 
 Use the preprocessing dependencies for JPG and XLSX decoding. The classification models run on CPU with no pretrained weights. Put this configuration in a file such as `classification.yaml` and point `data_path` at the extracted dataset.

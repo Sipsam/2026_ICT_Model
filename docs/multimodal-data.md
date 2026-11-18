@@ -163,8 +163,9 @@ source-unit statistics.
 | `Batch.sensor_tensors()` | With an existing PyTorch installation, returns CPU float64 sensor values, Boolean masks, and int64 lengths. All-image batches have a zero-length sensor axis. The default data API uses Python floats, Boolean masks, and no tensor dependency. |
 
 The cohort includes only verified AI Hub sensor windows for model-facing
-views. Live sensor protocols, fusion model adapters, and performance
-evaluation require separate implementation and validation.
+views. The Python product models consume these batches and the frozen
+preprocessing fingerprint. Live sensor integration and performance evaluation
+require separate validation. [Encoders and fusion contracts](multimodal-architecture.md)
 
 ## Measured coverage on local AI Hub 71900
 

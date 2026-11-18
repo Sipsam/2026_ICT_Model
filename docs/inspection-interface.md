@@ -65,3 +65,9 @@ Batch attempts report their directory on standard error before processing images
 Python callers can use `InspectionRequest`, `Detection`, `ModelProvenance`, and `InspectionResult` from `ict_pipeline.inspection.contracts`. Construct `InspectionService.mock(...)` or `InspectionService.from_run(..., trust_run=True)` once and call `service.inspect(request)` for each image. Pydantic's `model_json_schema()` exposes the version 1 structures. Image inspection runs locally and reads the supplied image and checkpoint files. Integration with factory verification, model calibration, and production acceptance remains separate from this interface.
 
 Camera and sensor streams use the same inspection service and record format. Replay and device adapters send encoded frames with `InspectionMetadataInput` and add their alignment evidence under `result.metadata.streaming`. [Input streaming and alignment](input-streaming.md)
+
+The standalone Python product model can carry existing detector predictions
+alongside view-level risk scores. It records unavailable modalities and
+uncalibrated score status. Factory acceptance still depends on the
+inspection verification policy described above.
+[Multimodal prediction contract](multimodal-architecture.md)

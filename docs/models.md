@@ -74,3 +74,15 @@ For Docker, put the cache under the profile directory and use a relative checkpo
 - Peking University's RT-DETR model card lists Apache-2.0. Retain applicable notices and license terms when redistributing, and review the training data terms for the intended use. [Checkpoint model card](https://huggingface.co/PekingU/rtdetr_r18vd) · [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0)
 
 AI Hub usage conditions also apply when training on SMT data. [Project licensing and data permissions](licenses.md)
+
+## Multimodal product models
+
+The Python architecture accepts frozen sensor windows and image embeddings
+for view-level binary or five-class multi-label defect presence. A separate
+checkpoint format binds the architecture to the Train-fitted preprocessing
+state. Existing detector predictions can accompany the product result in
+their original coordinates. The optional Faster R-CNN adapter pools an FPN
+level from a caller-supplied detector. YOLO and RT-DETR provide detection
+evidence through their existing evaluation interfaces. Product heads start
+untrained, and their accuracy and calibration remain unverified.
+[Architecture and model interfaces](multimodal-architecture.md)
