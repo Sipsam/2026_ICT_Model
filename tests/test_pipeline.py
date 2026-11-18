@@ -401,7 +401,7 @@ def test_cli_production_preview_and_unavailable_adapter(tmp_path: Path, monkeypa
         "download", "extract", "audit", "manifest", "convert", "validate_detection",
         "train", "validate_models", "evaluate", "report",
     ]
-    assert preview.stdout.count("adapter unavailable") == 10
+    assert preview.stdout.count("adapter unavailable") == 6
     assert list(tmp_path.iterdir()) == []
     result = client.invoke(cli.app, ["run", "--run-id", "production"])
     assert result.exit_code == 1

@@ -17,7 +17,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8"]
+preprocess = ["Pillow>=10", "openpyxl>=3.1"]
+test = ["pytest>=8", "Pillow>=10", "openpyxl>=3.1"]
 
 [project.scripts]
 ict = "ict_pipeline.cli:app"

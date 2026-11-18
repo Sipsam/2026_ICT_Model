@@ -32,7 +32,7 @@ The CLI runs without PyTorch, GPU libraries, or dataset files.
 
 `ict --help` lists the registered commands, and `ict --version` prints the installed package version. Both exit with status `0`.
 
-`train`, `evaluate`, `compare`, `report`, and `clean` are placeholders and exit with status `1`. Existing audit and conversion tools can be invoked directly from `scripts/` with their own dependencies. The rollout is described in [PLANS.md](PLANS.md).
+`train`, `evaluate`, `compare`, `report`, and `clean` are placeholders and exit with status `1`. The rollout is described in [PLANS.md](PLANS.md).
 
 ## Acquire and verify dataset 71900
 
@@ -50,7 +50,7 @@ The packaged [SMT dataset selection](src/ict_pipeline/data/aihub_smt.yaml) recor
 
 Validated bundles are kept under `data/raw/.ict-aihub/` by selection and split. Interrupted transfers remain as `.partial` files. A retry starts a fresh transfer for the affected split and reuses any verified completed split. The downloader checks bundle integrity and ZIP CRCs before publishing a checkpoint. The file keys and size caps are based on the repository's historical XLSX selection. If AI Hub changes the selection or format, ingestion reports a failed validation.
 
-`ict data extract` publishes a new English-layout dataset directory with `.ict-ingestion.json`, which records the selection fingerprint, selected file-tree hash, and counts per split. Source archives are retained. `ict data verify` checks selected folder coverage, matched sample stems, basic file signatures, and the completion hash when present. Run the existing audit scripts for annotation and sensor-content validation.
+`ict data extract` publishes a new English-layout dataset directory with `.ict-ingestion.json`, which records the selection fingerprint, selected file-tree hash, and counts per split. Source archives are retained. `ict data verify` checks selected folder coverage, matched sample stems, basic file signatures, and the completion hash when present. The `audit` stage checks annotation and sensor content.
 
 ## Plan, inspect, and resume a pipeline run
 
@@ -61,7 +61,7 @@ ict status
 ict resume --run-id <id>
 ```
 
-The production DAG declares ten stages from download through report. With `dataset_source: aihub` or `dataset_source: existing` configured, `ict run --until extract` executes the two ingestion stages. Their artifacts are `archives/` and `dataset/` under the corresponding published attempt directories. When an existing dataset is selected, the download stage records its reuse and the extract stage copies the selected files into the run artifact. For missing transfers, `ict run --until extract --approve-download` authorizes acquisition. Pass the same approval flag to `ict resume` if a resumed run still needs transfers. Adapters from audit through report are planned.
+The production DAG declares ten stages from download through report. With `dataset_source: aihub` or `dataset_source: existing` configured, `ict run --until extract` executes the two ingestion stages. Their artifacts are `archives/` and `dataset/` under the corresponding published attempt directories. When an existing dataset is selected, the download stage records its reuse and the extract stage copies the selected files into the run artifact. For missing transfers, `ict run --until extract --approve-download` authorizes acquisition. Pass the same approval flag to `ict resume` if a resumed run still needs transfers. Training and later stage adapters are planned.
 
 With executable stages registered, `ict run` selects the entire DAG and creates a run ID. Pass `--run-id <id>` to choose a name or reuse that run's cache. `--from` and `--until` select an inclusive range in dependency order. Repeat `--only` to select individual stages. Any omitted prerequisite must have a valid result in the same run. `--force` recomputes the selection in new artifact directories.
 
@@ -69,7 +69,30 @@ With executable stages registered, `ict run` selects the entire DAG and creates 
 
 Each run stores an atomic snapshot in `runs/<id>/state.json` and a structured event log in `events.jsonl`. A stage writes to `work/<stage>/<attempt>/`. After output verification, the runner publishes the directory under `artifacts/<stage>/<attempt>/` and commits the successful attempt to state. Failed and abandoned attempts remain available for inspection. Only an attempt recorded as completed and verified against its fingerprints is eligible for cache reuse. A lock allows one writer per run, and the OS releases it when the process exits. Cancellation returns status `130`. Progress includes elapsed time and an ETA when the stage reports measurable work.
 
-The Python adapter interface is `Stage`, `StageInput`, `StageContext`, and `StageResult` in `ict_pipeline.pipeline`. An adapter should read the declared inputs, write artifacts exclusively to `StageContext.output_dir`, and report progress as completed and total units. `StageContext.artifact_dir` is the future published path for files that must refer to it. Adapters own data-format validation and must keep secrets out of outputs and console messages. Bump `Stage.version` when changes to an adapter affect the validity of its results.
+The Python adapter interface is `Stage`, `StageInput`, `StageContext`, and `StageResult` in `ict_pipeline.pipeline`. An adapter should read the declared inputs, write artifacts exclusively to `StageContext.output_dir`, and report progress as completed and total units. `StageContext.artifact_dir` is the future published path for files that must refer to it. `StageContext.input_fingerprints` provides the verified content hash for each declared input. Adapters own data-format validation and must keep secrets out of outputs and console messages. Bump `Stage.version` when changes to an adapter affect the validity of its results.
+
+## Preprocess and validate detections
+
+Install the CPU preprocessing extra for image decoding and XLSX checks.
+
+```text
+python -m pip install -e ".[preprocess]"
+ict run --until validate_detection --run-id smt
+ict resume --run-id smt
+```
+
+The command uses the configured ingestion source. To audit an extracted dataset in place, use a profile with `dataset_source: skip` and `data_path` pointing to the extracted dataset. Run `ict run --config <profile> --from audit --until validate_detection --run-id smt` to start from that tree.
+
+| Stage | Published artifacts |
+|---|---|
+| `audit` | `samples.csv`, `issues.csv`, and `summary.json` with split counts, sensor ID offsets, JSON/XLSX checks, data fingerprints, and the versioned label policy |
+| `manifest` | `manifest.csv` and `manifest_summary.json` with audit flags, decision reasons, label policy, and input hashes. Paths in the pipeline manifest are relative to the dataset root. |
+| `convert` | `detection/yolo/data.yaml`, YOLO images and labels, COCO images and annotations, and `detection/conversion_summary.json` |
+| `validate_detection` | `issues.csv` and `summary.json`. If issues are found, the run fails and retains the reports in the failed work directory. |
+
+Conversion keeps the original Train and Validation assignments and exports only `candidate` rows eligible for detection. AI Hub categories `23/24/25/27/30` map to YOLO `0/1/2/3/4` and COCO `1/2/3/4/5`. Normal boxes are omitted, and eligible normal images retain empty YOLO labels. The audit compares sensor timestamps and measurement values independently of the reported sensor/image ID offsets. The manifest records sensor alignment metadata and keeps sensor training approval pending.
+
+The four commands under `scripts/` retain their standalone arguments and default paths. Standalone manifests use the legacy repository-relative paths. Pass `--overwrite` to authorize replacing existing standalone reports. Standalone conversion requires a fresh output directory and keeps its legacy hard-link default. Pipeline conversion copies images.
 
 ## Environment diagnostics
 
@@ -113,4 +136,6 @@ python -m pip install -e ".[test]"
 python -m pytest
 ```
 
-The CLI tests use a temporary directory and run without dataset files, credentials, or a GPU.
+The tests generate tiny JPG, JSON, and XLSX fixtures in temporary directories and run without the AI Hub dataset, credentials, or a GPU.
+
+To opt in to the real-data regression, set `ICT_REAL_DATA_ROOT` to an already extracted AI Hub 71900 dataset and run `python -m pytest -q tests/test_preprocessing.py -k real_data_regression`. The test reads that tree and writes derived artifacts under pytest's temporary directory. It checks the historical expectations of 15,372 audited samples, 14,718 candidates, 645 holds, 9 exclusions, 13,062 Train and 1,656 Validation candidates, 16,877 boxes, and zero validation issues.

@@ -214,7 +214,12 @@ def _pipeline(config: Path | None, run_id: str | None, approve_download: bool = 
             acquisition, provider_for(credentials, os.environ), existing, approve_download,
             lambda missing: show_download_plan(acquisition, missing),
         )
-    stages = pipeline_stages() if data is None else pipeline_stages(data)
+    if data is not None:
+        stages = pipeline_stages(data)
+    elif "data_path" in settings:
+        stages = pipeline_stages(dataset_root=Path(settings["data_path"]))
+    else:
+        stages = pipeline_stages()
     return StageRunner(stages, root, settings, on_event=_pipeline_progress)
 
 

@@ -4,11 +4,15 @@ from collections.abc import Callable
 from importlib.metadata import version
 from pathlib import Path
 
+from ..data.preprocessing import stages as preprocessing
+from ..data.preprocessing.policy import POLICY_VERSION
 from ..data.stages import DataStages
 from .model import Stage, StageContext, StageInput, StageResult
 
 
-def pipeline_stages(data: DataStages | None = None) -> tuple[Stage, ...]:
+def pipeline_stages(
+    data: DataStages | None = None, *, dataset_root: Path | None = None,
+) -> tuple[Stage, ...]:
     revision = version("ict-pipeline")
 
     def artifact(producer: str, path: str, *, name: str | None = None) -> StageInput:
@@ -26,7 +30,9 @@ def pipeline_stages(data: DataStages | None = None) -> tuple[Stage, ...]:
         return Stage(name, dependencies, inputs, tuple(map(Path, outputs)), ("execution_mode", *config_keys),
                      stage_version, execute)
 
-    extracted = artifact("extract", "dataset")
+    dataset = (
+        artifact("extract", "dataset") if dataset_root is None else StageInput("dataset", dataset_root)
+    )
     manifest = artifact("manifest", "manifest.csv", name="manifest")
     detection = artifact("convert", "detection")
     validation = artifact("validate_detection", "summary.json", name="detection_validation")
@@ -35,23 +41,27 @@ def pipeline_stages(data: DataStages | None = None) -> tuple[Stage, ...]:
     existing = (StageInput("existing_dataset", data.existing),) if data and data.existing else ()
     data_config = ("dataset_source", "data_path", "raw_path")
     data_version = f"{revision}:ingestion-v1:{data.acquisition.selection.fingerprint}" if data else revision
+    preprocessing_version = f"{revision}:preprocessing-v1:{POLICY_VERSION}"
 
     return (
         stage("download", existing, ("archives",), data_config, data.download if data else None, data_version),
         stage("extract", (artifact("download", "archives"), *existing), ("dataset",), data_config,
               data.extract if data else None, data_version),
-        stage("audit", (extracted,), ("samples.csv", "issues.csv", "summary.json")),
+        stage("audit", (dataset,), ("samples.csv", "issues.csv", "summary.json"),
+              execute=preprocessing.audit, stage_version=preprocessing_version),
         stage("manifest", (
-            extracted,
+            dataset,
             artifact("audit", "samples.csv", name="samples"),
             artifact("audit", "issues.csv", name="issues"),
             artifact("audit", "summary.json", name="audit_summary"),
-        ), ("manifest.csv", "manifest_summary.json")),
-        stage("convert", (extracted, manifest), (
+        ), ("manifest.csv", "manifest_summary.json"),
+              execute=preprocessing.manifest, stage_version=preprocessing_version),
+        stage("convert", (dataset, manifest), (
             "detection", "detection/yolo/data.yaml", "detection/coco/annotations/instances_train.json",
             "detection/coco/annotations/instances_val.json", "detection/conversion_summary.json",
-        )),
-        stage("validate_detection", (manifest, detection), ("issues.csv", "summary.json")),
+        ), execute=preprocessing.convert, stage_version=preprocessing_version),
+        stage("validate_detection", (manifest, detection), ("issues.csv", "summary.json"),
+              execute=preprocessing.validate, stage_version=preprocessing_version),
         stage("train", (detection, validation), ("checkpoints",), ("model", "device", "training_profile", "tracking")),
         stage("validate_models", (detection, checkpoints), ("predictions",), ("model", "device")),
         stage("evaluate", (detection, artifact("validate_models", "predictions")), ("metrics.json",)),

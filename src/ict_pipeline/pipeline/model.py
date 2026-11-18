@@ -2,7 +2,7 @@
 
 import re
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
@@ -58,6 +58,7 @@ class StageContext:
     output_dir: Path
     artifact_dir: Path
     progress: Callable[[int, int | None], None]
+    input_fingerprints: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

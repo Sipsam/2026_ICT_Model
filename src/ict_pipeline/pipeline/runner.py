@@ -166,7 +166,7 @@ class StageRunner:
 
     def _inputs(
         self, store: RunStore, stage: Stage, available: Mapping[str, StageRecord]
-    ) -> tuple[dict[str, Path], str]:
+    ) -> tuple[dict[str, Path], str, dict[str, str]]:
         paths: dict[str, Path] = {}
         fingerprints: dict[str, tuple[str, str]] = {}
         for item in stage.inputs:
@@ -197,7 +197,7 @@ class StageRunner:
                 for name in stage.dependencies
             },
         })
-        return paths, fingerprint
+        return paths, fingerprint, {name: digest for name, (_, digest) in fingerprints.items()}
 
     def _reusable(
         self, store: RunStore, stage: Stage, record: StageRecord | None, available: Mapping[str, StageRecord]
@@ -208,7 +208,7 @@ class StageRunner:
         ):
             return False
         try:
-            _, current = self._inputs(store, stage, available)
+            _, current, _ = self._inputs(store, stage, available)
             return record.fingerprint == current and record.output_fingerprint == self._verify_outputs(
                 stage, store.artifact_dir(stage.name, record.attempt)
             )
@@ -307,11 +307,14 @@ class StageRunner:
             emit("running")
             if stage.execute is None:
                 raise PipelineError(f"Stage {name} requires an adapter. See the pipeline phases in PLANS.md.")
-            inputs, record.fingerprint = self._inputs(store, stage, available)
+            inputs, record.fingerprint, input_fingerprints = self._inputs(store, stage, available)
             temporary = store.working_dir(name, attempt)
             final = store.artifact_dir(name, attempt)
             temporary.mkdir(parents=True)
-            context = StageContext(MappingProxyType(inputs), MappingProxyType(settings), temporary, final, progress)
+            context = StageContext(
+                MappingProxyType(inputs), MappingProxyType(settings), temporary, final, progress,
+                MappingProxyType(input_fingerprints),
+            )
             try:
                 result = stage.execute(context)
             except StageFailure:
