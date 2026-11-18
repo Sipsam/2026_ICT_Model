@@ -126,6 +126,7 @@ class YoloAdapter:
                     temporary.replace(self.wdir / f"epoch-{epoch}.pt")
                 request.record_metrics({
                     **{key: float(value) for key, value in self.metrics.items() if isinstance(value, Real)},
+                    **{key: float(value) for key, value in self.label_loss_items(self.tloss).items()},
                     "epoch": epoch, "fitness": float(self.fitness),
                 })
                 request.progress("epoch checkpoint", epoch, cfg.epochs)

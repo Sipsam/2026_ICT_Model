@@ -134,6 +134,7 @@ class CocoAdapter:
             if frozen_backbone is not None:
                 frozen_backbone.eval()
             request.progress(f"epoch {epoch}/{cfg.epochs} train batch", 0, len(train))
+            train_loss = 0.0
             for step, batch in enumerate(train, 1):
                 optimizer.zero_grad(set_to_none=True)
                 with torch.autocast(device_type, dtype=dtype, enabled=mixed):
@@ -143,6 +144,7 @@ class CocoAdapter:
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
+                train_loss += loss.detach().item() * len(batch[1])
                 request.progress(f"epoch {epoch}/{cfg.epochs} train batch", step, len(train))
 
             self.validation_mode(model)
@@ -173,7 +175,10 @@ class CocoAdapter:
                 _atomic_copy(checkpoints.last, checkpoints.best)
             if cfg.save_period and epoch % cfg.save_period == 0:
                 _atomic_copy(checkpoints.last, request.output / f"epoch-{epoch}.pt")
-            request.record_metrics({"epoch": epoch, "val_loss": val_loss, "best_val_loss": best_loss})
+            request.record_metrics({
+                "epoch": epoch, "train_loss": train_loss / len(train.dataset),
+                "val_loss": val_loss, "best_val_loss": best_loss,
+            })
             request.progress("epoch checkpoint", epoch, cfg.epochs)
         return checkpoints
 
@@ -215,7 +220,14 @@ class FasterRCNNAdapter(CocoAdapter):
         for key in reset:
             rows = classes * 4 if ".bbox_pred." in key else classes
             shapes[key] = (rows, *shapes[key][1:])
-        transfer_state(model, state, shapes, reset, request)
+        # The published COCO_V1 state predates TorchVision's convolution wrappers.
+        # Match its FPN and RPN migrations before ICT checks the source tensor layout.
+        renames = {
+            f"backbone.fpn.{block}.{index}.{parameter}": f"backbone.fpn.{block}.{index}.0.{parameter}"
+            for block in ("inner_blocks", "layer_blocks") for index in range(2) for parameter in ("bias", "weight")
+        }
+        renames.update({f"rpn.head.conv.{key}": f"rpn.head.conv.0.0.{key}" for key in ("bias", "weight")})
+        transfer_state(model, state, shapes, reset, request, renames=renames)
 
     def batch_loss(self, model: Any, batch: Batch, request: TrainingRequest) -> torch.Tensor:
         import torch

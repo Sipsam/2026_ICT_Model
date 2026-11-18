@@ -142,6 +142,27 @@ def test_partial_transfer_rejects_unapproved_keys_before_loading(tmp_path: Path)
     assert all(torch.equal(before[key], value) for key, value in model.state_dict().items())
 
 
+def test_transfer_checks_explicit_legacy_tensor_renames(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    model = torch.nn.Linear(3, 5)
+    reports = []
+    request = TrainingRequest(TrainConfig(), SimpleNamespace(), tmp_path, "cpu", lambda *_: None,
+                              record_transfer=reports.append)
+    source = {"legacy.weight": torch.ones(5, 3), "bias": torch.zeros(5)}
+    shapes = {"weight": (5, 3), "bias": (5,)}
+    renames = {"legacy.weight": "weight"}
+    transfer_state(model, source, shapes, set(), request, renames=renames)
+    assert reports[0]["missing_keys"] == ["weight"]
+    assert reports[0]["unexpected_keys"] == ["legacy.weight"]
+    assert reports[0]["renamed_keys"] == renames
+    assert torch.equal(model.weight, source["legacy.weight"])
+    with pytest.raises(TrainingError, match="incompatible"):
+        transfer_state(model, {**source, "weight": torch.zeros(5, 3)}, shapes, set(), request, renames=renames)
+    with pytest.raises(TrainingError, match="incompatible"):
+        transfer_state(model, {**source, "legacy.weight": torch.ones(4, 3)}, shapes, set(), request, renames=renames)
+    assert torch.equal(model.weight, source["legacy.weight"])
+
+
 @pytest.mark.parametrize("pretrained", [False, True])
 def test_revision_bound_resume_with_legacy_scratch_compatibility(
     detection: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pretrained: bool,

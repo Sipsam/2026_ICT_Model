@@ -12,7 +12,9 @@ Omitting `initialization` uses `scratch`. The packaged profiles specify that mod
 
 The supported source label counts default to 80 for YOLO and RT-DETR, and 91 including background for Faster R-CNN. For trusted checkpoints with the same architecture and a different label count, set `checkpoint.source_classes`. This changes the expected source tensor shapes. The target class order always comes from the SMT label policy.
 
-The Faster R-CNN pretrained profile uses the official FrozenBatchNorm backbone layout. The RT-DETR pretrained profile uses three decoder layers and the official R18 encoder expansion of 0.5. Historical scratch profiles retain their original BatchNorm and RT-DETR encoder expansion of 1.0. These differences matter when interpreting a scratch-versus-pretrained comparison.
+The Faster R-CNN pretrained profile uses the official FrozenBatchNorm backbone layout. It applies TorchVision's legacy FPN and RPN key renames before strict tensor validation and records the applied renames in `run.json`. The RT-DETR pretrained profile uses three decoder layers and the official R18 encoder expansion of 0.5. Historical scratch profiles retain their original BatchNorm and RT-DETR encoder expansion of 1.0. These differences matter when interpreting a scratch-versus-pretrained comparison.
+
+The [real-data smoke guide](real-data-smoke-test.md) records the exact official files and full digests used by the bounded SMT experiment. `python -m ict_pipeline.smoke` generates all three pinned profiles. The experiment freezes each backbone and records transfer diagnostics and training loss in `run.json`.
 
 ## Example RT-DETR profile
 

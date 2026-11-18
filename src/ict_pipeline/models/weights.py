@@ -161,8 +161,9 @@ def load_weights(request: TrainingRequest, *, native_type: type | None = None) -
 def transfer_state(
     model: Any, source: Mapping[str, Any], source_shapes: Mapping[str, tuple[int, ...]],
     reset_keys: set[str], request: TrainingRequest, *, aliases: Mapping[str, str] | None = None,
+    renames: Mapping[str, str] | None = None,
 ) -> None:
-    """Allow omissions only for declared tied aliases and reset only approved head keys."""
+    """Normalize declared keys, check every tensor, and reset only approved head keys."""
     import torch
 
     target = model.state_dict()
@@ -172,7 +173,12 @@ def transfer_state(
     missing = sorted(target.keys() - source.keys())
     unexpected = sorted(source.keys() - target.keys())
     restored = {}
+    renamed = {}
     incompatible = set()
+    for old, new in (renames or {}).items():
+        if old in state and new in target and new not in state:
+            state[new] = state.pop(old)
+            renamed[old] = new
     for key, alias in (aliases or {}).items():
         if key in state and alias in state:
             if not torch.equal(state[key], state[alias]):
@@ -189,11 +195,14 @@ def transfer_state(
             or (not expected.is_floating_point() and value.dtype != expected.dtype)
         ):
             incompatible.add(key)
-    request.record_transfer({
+    diagnostics = {
         "missing_keys": missing, "unexpected_keys": unexpected, "incompatible_keys": sorted(incompatible),
         "reset_keys": sorted(reset_keys), "restored_aliases": restored,
-    })
-    if set(missing) - restored.keys() or unexpected or incompatible:
+    }
+    if renamed:
+        diagnostics["renamed_keys"] = renamed
+    request.record_transfer(diagnostics)
+    if target.keys() != state.keys() or incompatible:
         raise TrainingError("Checkpoint tensors are incompatible with the declared architecture. See transfer diagnostics in run.json.")
     retained = target.keys() - reset_keys
     if any(state[key].shape != target[key].shape for key in retained):
