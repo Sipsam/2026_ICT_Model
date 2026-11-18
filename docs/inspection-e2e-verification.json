@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "status": "passed",
+  "environment": {
+    "platform": "Windows",
+    "python": "3.11.9",
+    "sqlite": "3.45.1",
+    "node": "24.22.1",
+    "fastapi": "0.139.0",
+    "uvicorn": "0.46.0",
+    "python_launch_note": "Used the existing virtual environment with an existing API dependency directory appended to the Python import path."
+  },
+  "checks": {
+    "lightweight_pytest": {
+      "status": "passed",
+      "command": "python -m pytest -q -rs -m \"not cpu_backend and not real_data_smoke\" -k \"not real_data_regression\"",
+      "passed": 284,
+      "skipped": 3,
+      "deselected": 18,
+      "warnings": 1,
+      "skip_reasons": [
+        "Windows directory symlink privilege unavailable",
+        "Opt-in real-data integrity fixture absent",
+        "Detached worker requires Linux file-descriptor inheritance"
+      ]
+    },
+    "javascript": {
+      "status": "passed",
+      "command": "node --test tests/dashboard.test.mjs",
+      "passed": 6
+    },
+    "demonstration": {
+      "status": "passed",
+      "inference_mode": "mock",
+      "transport": "ASGI TestClient with lifespan",
+      "per_run_report": "integration-report.json",
+      "runs": [
+        {
+          "command": "python -m scripts.inspection_e2e",
+          "sensor_fixture": true,
+          "stored_records": 4,
+          "replay_records_reused": 3,
+          "restored_records": 4,
+          "live_wal_bytes": 41232,
+          "elapsed_seconds": 1.468,
+          "python_traced_peak_bytes": 69046284,
+          "retained_artifact_bytes_before_report": 179105,
+          "remaining_server_workspace_directories": 0
+        },
+        {
+          "command": "python -m scripts.inspection_e2e --image-only",
+          "sensor_fixture": false,
+          "stored_records": 4,
+          "replay_records_reused": 3,
+          "restored_records": 4,
+          "live_wal_bytes": 41232,
+          "elapsed_seconds": 1.406,
+          "python_traced_peak_bytes": 69041369,
+          "retained_artifact_bytes_before_report": 177912,
+          "remaining_server_workspace_directories": 0
+        }
+      ]
+    },
+    "installed_cli": {
+      "status": "passed",
+      "command": "ict inspect <synthetic-image> --mock defect --output-dir <fresh-output>",
+      "exit_code": 0,
+      "exports": ["inspection.json", "inspection.csv"]
+    },
+    "authenticated_live_upload": {
+      "status": "passed",
+      "transport": "Uvicorn over loopback HTTP",
+      "unauthenticated_status": 401,
+      "upload_status": 201,
+      "stored_records": 1,
+      "token_redacted": true
+    },
+    "browser_smoke": {
+      "status": "passed",
+      "browser": "Chrome/157.0.8103.79",
+      "transport": "Uvicorn over loopback HTTP",
+      "real_view_rows": 0,
+      "mock_view_rows": 4,
+      "verified": ["staged original", "pixel overlay", "linked sensor JSON", "replay status"],
+      "uncaught_javascript_errors": 0
+    },
+    "multipart_abort": {
+      "status": "passed",
+      "command": "python -m pytest -q tests/test_inspection_e2e.py -k multipart_abort",
+      "cases": ["truncated multipart", "body byte limit", "upload timeout"],
+      "previous_implementation": {"status": "failed", "failed": 3},
+      "updated_implementation": {"status": "passed", "passed": 3}
+    },
+    "real_model_inference": {"status": "not_run"},
+    "detector_training_and_real_data_smoke": {"status": "not_run"},
+    "internal_test_evaluation": {"status": "not_run"},
+    "physical_input_devices": {"status": "not_run"},
+    "production_load_and_native_resource_usage": {"status": "not_run"}
+  }
+}

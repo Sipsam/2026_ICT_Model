@@ -29,6 +29,20 @@ class UploadParser(MultiPartParser):
         super().__init__(request.headers, _bounded_stream(request, settings.max_request_bytes),
                          max_files=max_files, max_fields=1, max_part_size=MAX_DETAILS_BYTES)
 
+    async def parse(self) -> FormData:
+        try:
+            form = await super().parse()
+            if not self.complete:
+                raise APIError("malformed_request")
+            return form
+        except BaseException:
+            # Starlette closes these on MultiPartException only. Other aborts can
+            # leave an unfinished file outside the returned FormData.
+            for file in self._files_to_close_on_error:
+                if not file.closed:
+                    file.close()
+            raise
+
     def on_part_begin(self) -> None:
         super().on_part_begin()
         self._header_bytes = 0
@@ -80,9 +94,6 @@ async def read_form(request: Request, settings: APISettings, max_files: int) -> 
         raise APIError("upload_timeout") from None
     except (MultiPartException, MultipartParseError, ClientDisconnect, ValueError):
         raise APIError("malformed_request") from None
-    if not parser.complete:
-        await form.close()
-        raise APIError("malformed_request")
     return form
 
 
