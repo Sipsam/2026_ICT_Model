@@ -6,7 +6,7 @@ import os
 import platform
 from collections.abc import Iterator, Mapping
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from importlib import import_module
 from importlib.metadata import version
@@ -25,11 +25,12 @@ from ..config.storage import SetupFiles
 from ..data.preprocessing.common import require_separate_output
 from ..data.preprocessing.console import protect_source_data
 from ..data.preprocessing.policy import label_policy
+from ..data.preprocessing.revision import read_dataset_seal
 from ..pipeline.model import PipelineError
 from ..pipeline.store import RunStore, digest_json, fingerprint_path, timestamp
 from ..reporting.attempt import track_attempt
 from .contracts import Checkpoints, ModelAdapter, ModelName, Progress, TrainConfig, TrainingError, TrainingRequest
-from .dataset import DetectionData, inspect_data
+from .dataset import DetectionData, inspect_data, verify_shared_labels
 from .registry import REGISTRY, failure_message, resolve_device
 
 
@@ -166,6 +167,19 @@ def execute_training(plan: TrainingPlan, progress: Progress) -> Iterator[tuple[M
 
 def _execute_training(plan: TrainingPlan, progress: Progress) -> Iterator[tuple[ModelName, Checkpoints]]:
     datasets = dict(plan.verified_data or {})
+    try:
+        seal = read_dataset_seal(plan.dataset)
+    except ValueError as exc:
+        raise TrainingError(str(exc)) from None
+    if seal is not None:
+        revision = {**(plan.dataset_revision or {}), "selected_split": seal}
+        plan = replace(plan, dataset_revision=revision)
+    if seal is not None or all((plan.dataset / fmt).is_dir() for fmt in ("yolo", "coco")):
+        for data_format in ("yolo", "coco"):
+            if data_format not in datasets:
+                datasets[data_format] = inspect_data(plan.dataset, data_format, plan.credentials, progress)
+        if plan.verified_data is None and seal is None:
+            verify_shared_labels(datasets["yolo"], datasets["coco"])
     runtimes = {}
     for name, config in plan.models.items():
         backend = REGISTRY[name]
@@ -207,6 +221,7 @@ def _train_model(
         "configuration": config.model_dump(mode="json"), "device": device,
         "dataset_format": backend.data_format, "split_fingerprints": data.split_fingerprints,
         "annotation_fingerprint": data.annotation_fingerprint, "label_policy": label_policy(),
+        "split_annotation_fingerprints": data.split_annotation_fingerprints,
         "libraries": library_versions, "ict_pipeline": version("ict-pipeline"), "code_fingerprints": code,
         "python": platform.python_version(), "system": platform.system(), "machine": platform.machine(),
         "checkpoint_format": backend.checkpoint_format, "library_license": backend.license,
@@ -267,8 +282,14 @@ def _train_model(
                 result = adapter.train(TrainingRequest(config, data, output, device, report, resume, record_metrics))
             if result != checkpoints or len(_records(output, result)) != 2:
                 raise TrainingError("Training did not produce both best and last checkpoints.")
-            if plan.dataset_revision is not None and fingerprint_path(plan.dataset) != plan.dataset_revision["detection"]:
-                raise TrainingError("The verified detection dataset changed during training. Restore stable inputs.")
+            if plan.dataset_revision is not None:
+                expected = plan.dataset_revision
+                try:
+                    if ("detection" in expected and fingerprint_path(plan.dataset) != expected["detection"]
+                            or "selected_split" in expected and read_dataset_seal(plan.dataset) != expected["selected_split"]):
+                        raise ValueError
+                except (ValueError, OSError):
+                    raise TrainingError("The verified detection dataset changed during training. Restore stable inputs.") from None
             metadata["status"] = "completed"
         except KeyboardInterrupt:
             metadata["status"] = "interrupted"

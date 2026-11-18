@@ -225,6 +225,8 @@ Conversion keeps the original Train and Validation assignments and exports only 
 
 The four commands under `scripts/` retain their standalone arguments and default paths. Standalone manifests use the legacy repository-relative paths. Pass `--overwrite` to authorize replacing existing standalone reports. Standalone conversion requires a fresh output directory and keeps its legacy hard-link default. Pipeline conversion copies images.
 
+Use `ict integrity analyze` to measure overlap in the original AI Hub assignments and `ict integrity split --dry-run` to preview a group-aware revision. Published split bundles are opt-in through `ict run --split-bundle` or the standalone commands' `--dataset` option. The [dataset integrity and evaluation protocol](docs/dataset-integrity.md) describes the evidence, publication options, and Test roles.
+
 ## Sensor and image-level classification
 
 Use the preprocessing dependencies for JPG and XLSX decoding. The classification models run on CPU with no pretrained weights. Put this configuration in a file such as `classification.yaml` and point `data_path` at the extracted dataset.

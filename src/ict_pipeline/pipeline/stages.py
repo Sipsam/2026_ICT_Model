@@ -21,7 +21,7 @@ CLASSIFICATION_STAGES = ("classification_prepare", "classification_train", "clas
 def pipeline_stages(
     data: DataStages | None = None, *, dataset_root: Path | None = None,
     classification: ClassificationConfig | None = None, approve_train: bool = False,
-    detectors: DetectionStages | None = None,
+    detectors: DetectionStages | None = None, split_bundle: Path | None = None,
 ) -> tuple[Stage, ...]:
     revision = version("ict-pipeline")
 
@@ -46,6 +46,10 @@ def pipeline_stages(
     manifest = artifact("manifest", "manifest.csv", name="manifest")
     manifest_summary = artifact("manifest", "manifest_summary.json", name="manifest_summary")
     detection = artifact("convert", "detection")
+    if split_bundle is not None:
+        manifest = StageInput("manifest", split_bundle / "manifest.csv")
+        manifest_summary = StageInput("manifest_summary", split_bundle / "split.json")
+        detection = StageInput("detection", split_bundle / "detection")
     validation = artifact("validate_detection", "receipt.json", name="detection_validation")
     checkpoints = artifact("train", "checkpoints")
 
@@ -90,7 +94,9 @@ def pipeline_stages(
             "detection/coco/annotations/instances_val.json", "detection/conversion_summary.json",
         ), execute=preprocessing.convert, stage_version=preprocessing_version),
         stage("validate_detection", (manifest, manifest_summary, detection), ("issues.csv", "summary.json", "receipt.json"),
-              execute=preprocessing.validate, stage_version=f"{preprocessing_version}:receipt-v1"),
+              ("detection_split_bundle",) if split_bundle is not None else (),
+              execute=preprocessing.validate_revision if split_bundle is not None else preprocessing.validate,
+              stage_version=f"{preprocessing_version}:receipt-{'split-v1' if split_bundle is not None else 'v1'}"),
         stage("train", (detection, manifest, manifest_summary, validation), ("checkpoints",),
               ("detection_training",), detectors.train, training_version),
         stage("validate_models", (detection, checkpoints), ("predictions",),
@@ -101,6 +107,8 @@ def pipeline_stages(
               execute=detectors.report,
               stage_version=f"{detection_version}:{fingerprint_path(Path(__file__).parents[1] / 'reporting/export.py')}"),
     )
+    if split_bundle is not None:
+        return detection_stages[5:]
     if classification is None:
         return detection_stages
 

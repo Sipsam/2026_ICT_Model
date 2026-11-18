@@ -19,8 +19,9 @@ from ..config.storage import SetupFiles
 from ..data.preprocessing.common import require_separate_output
 from ..data.preprocessing.console import protect_source_data
 from ..data.preprocessing.policy import label_policy
+from ..data.preprocessing.revision import read_dataset_seal
 from ..models.contracts import ModelName, Progress, TrainConfig, TrainingError
-from ..models.dataset import Split, read_coco_split
+from ..models.dataset import Split, inspect_data, read_coco_split, verify_shared_labels
 from ..models.registry import REGISTRY
 from ..models.training import checkpoint_paths
 from ..pipeline.model import PipelineError
@@ -42,6 +43,8 @@ class Checkpoint:
     split_fingerprints: dict[str, str]
     bytes: int
     dataset_revision: dict[str, Any] | None = None
+    annotation_fingerprint: str | None = None
+    dataset_format: str | None = None
 
 
 def _local(path: Path, workspace: Path, credentials: Credentials) -> Path:
@@ -78,6 +81,7 @@ def inspect_checkpoint(run: Path, kind: CheckpointKind, credentials: Credentials
         return Checkpoint(
             name, path, fingerprint, TrainConfig.model_validate(metadata["configuration"]),
             metadata["split_fingerprints"], path.stat().st_size, metadata.get("dataset_revision"),
+            metadata.get("annotation_fingerprint"), metadata.get("dataset_format"),
         )
     except FileNotFoundError:
         raise EvaluationError("Training run metadata or checkpoint is missing. Pass a completed model directory.") from None
@@ -210,7 +214,7 @@ def checkpoint_record(checkpoint: Checkpoint, kind: CheckpointKind) -> dict[str,
 
 def dataset_record(
     split: EvaluationSplit, count: int, image_fingerprint: str, annotation_hash: str,
-    reference_hashes: dict[str, str], revision: dict[str, Any] | None = None,
+    reference_hashes: dict[str, str], revision: dict[str, Any] | None = None, *, internal_test: bool = False,
 ) -> dict[str, Any]:
     held_out = split == EvaluationSplit.TEST
     record = {
@@ -220,7 +224,43 @@ def dataset_record(
     }
     if revision is not None:
         record["training_dataset_revision"] = revision
+    if internal_test:
+        record.update(role="internal_group_holdout", test_origin="internal_same_source", external_independence=False)
     return record
+
+
+def _verify_training_revision(
+    checkpoints: list[Checkpoint], reference: Path, seal: dict[str, Any] | None, credentials: Credentials,
+    progress: Progress,
+) -> dict[str, Any] | None:
+    revisions = [checkpoint.dataset_revision for checkpoint in checkpoints]
+    if any((revision or {}).get("selected_split") != seal for revision in revisions):
+        raise EvaluationError("The verified split revision must match every checkpoint's training revision.")
+    revision = next((item for item in revisions if item is not None), None)
+    if revision is not None and (
+        any(item != revision for item in revisions)
+        or ("detection" in revision and fingerprint_path(reference) != revision["detection"])
+    ):
+        raise EvaluationError("The evaluation reference must match the verified detection revision used for training.")
+    # Legacy standalone runs recorded model-format annotation hashes for Train and Validation.
+    if revision is None:
+        inspected = {}
+        for checkpoint in checkpoints:
+            if checkpoint.annotation_fingerprint is None:
+                continue
+            fmt = checkpoint.dataset_format or REGISTRY[checkpoint.name].data_format
+            if fmt not in inspected:
+                inspected[fmt] = inspect_data(reference, fmt, credentials, progress)
+            data = inspected[fmt]
+            if data.annotation_fingerprint != checkpoint.annotation_fingerprint:
+                raise EvaluationError("Reference annotations differ from the training record.")
+            if data.split_fingerprints != checkpoint.split_fingerprints:
+                raise EvaluationError("Reference images differ from the training record.")
+        if "yolo" in inspected:
+            if "coco" not in inspected:
+                inspected["coco"] = inspect_data(reference, "coco", credentials, progress)
+            verify_shared_labels(inspected["yolo"], inspected["coco"])
+    return revision
 
 
 def _publish(path: Path, payload: dict[str, object]) -> None:
@@ -301,6 +341,18 @@ def evaluate_runs(
         checkpoints = [inspect_checkpoint(source, kind, credentials) for source in sources]
 
         try:
+            selected_seal = read_dataset_seal(dataset)
+            reference_seal = selected_seal if reference == dataset else read_dataset_seal(reference)
+        except ValueError as exc:
+            raise EvaluationError(str(exc)) from None
+
+        try:
+            internal_test = split == EvaluationSplit.TEST and selected_seal is not None
+            if internal_test and (
+                reference != dataset or selected_seal["split"]["test_origin"] != "internal_same_source"
+            ):
+                raise EvaluationError("Use the sealed dataset's own reference splits for its internal Test.")
+            revision = _verify_training_revision(checkpoints, reference, reference_seal, credentials, progress)
             labels, hashes, annotation_hash, snapshots = inspect_split(
                 dataset, split, credentials, progress, labels_required=True,
             )
@@ -326,15 +378,8 @@ def evaluate_runs(
         except (OSError, ValueError, TypeError, KeyError):
             raise EvaluationError("Cannot read or validate the labeled COCO split. Check annotations and image paths.") from None
 
-        revision = None
-        if split == EvaluationSplit.VALIDATION and any(cp.dataset_revision is not None for cp in checkpoints):
-            revision = next(cp.dataset_revision for cp in checkpoints if cp.dataset_revision is not None)
-            if (
-                any(cp.dataset_revision is not None and cp.dataset_revision != revision for cp in checkpoints)
-                or fingerprint_path(dataset) != revision.get("detection")
-            ):
-                raise EvaluationError("Validation dataset must match the verified detection revision used for training.")
-        data = dataset_record(split, len(labels.images), image_fingerprint, annotation_hash, reference_hashes, revision)
+        data = dataset_record(split, len(labels.images), image_fingerprint, annotation_hash, reference_hashes, revision,
+                              internal_test=internal_test)
         code = evaluation_code()
         protocol = evaluation_protocol(config)
         records = [checkpoint_record(checkpoint, kind) for checkpoint in checkpoints]

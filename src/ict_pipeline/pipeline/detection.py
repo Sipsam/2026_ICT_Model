@@ -126,6 +126,8 @@ class DetectionStages:
             "splits": data["coco"].split_fingerprints,
             "annotations": {fmt: item.split_annotation_fingerprints for fmt, item in data.items()},
         }
+        if "selected_split" in receipt:
+            revision["selected_split"] = receipt["selected_split"]
         target = context.output_dir / "checkpoints"
         target.mkdir()
         self.describe_training(str(dataset), context.artifact_dir / "checkpoints")

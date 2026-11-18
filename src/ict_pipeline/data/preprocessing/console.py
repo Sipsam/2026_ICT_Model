@@ -17,6 +17,26 @@ def protect_source_data(out: Path, workspace: Path) -> None:
 
 
 @contextmanager
+def fresh_output(out: Path, source: Path) -> Iterator[Path]:
+    """Publish a complete new output directory after its files have been written."""
+    if out.is_symlink():
+        raise ValueError("Choose an output directory that is not a link.")
+    out = out.resolve()
+    require_separate_output(source, out)
+    protect_source_data(out, Path.cwd())
+    if out.exists():
+        raise ValueError("Output already exists. Choose a fresh directory.")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(prefix=".ict-integrity-", dir=out.parent) as directory:
+        working = Path(directory) / "publishing"
+        working.mkdir()
+        yield working
+        if out.exists():
+            raise ValueError("Output already exists. Choose a fresh directory.")
+        working.rename(out)
+
+
+@contextmanager
 def report_output(
     out: Path, names: tuple[str, ...], *, overwrite: bool, sources: tuple[Path, ...],
 ) -> Iterator[Path]:

@@ -170,3 +170,27 @@ def inspect_data(
         )
     except (OSError, ValueError, TypeError, KeyError, yaml.YAMLError, RecursionError):
         raise TrainingError(f"Invalid generated {data_format.upper()} dataset. Check the files and rerun detection validation.") from None
+
+
+def verify_shared_labels(yolo: DetectionData, coco: DetectionData, *, tolerance: float = 1e-6) -> None:
+    """Check converted labels in normalized coordinates, including empty backgrounds."""
+    if yolo.split_fingerprints != coco.split_fingerprints:
+        raise TrainingError("YOLO and COCO Train/Validation images differ. Rerun conversion and detection validation.")
+    for name, split in coco.splits.items():
+        label_paths = dict(zip((image.name for image in yolo.splits[name].images), yolo.splits[name].annotations, strict=True))
+        for sample in split.samples:
+            remaining = []
+            for obj in sample.objects:
+                x, y, w, h = obj.box
+                remaining.append((obj.category - 1, (x + w / 2) / sample.width, (y + h / 2) / sample.height,
+                                  w / sample.width, h / sample.height))
+            for line in label_paths[sample.image.name].read_text(encoding="utf-8").splitlines():
+                numbers = tuple(map(float, line.split()))
+                match = next((i for i, box in enumerate(remaining) if numbers[0] == box[0] and all(
+                    abs(a - b) <= tolerance for a, b in zip(numbers[1:], box[1:], strict=True)
+                )), None)
+                if match is None:
+                    raise TrainingError("YOLO and COCO annotations differ. Rerun conversion and detection validation.")
+                remaining.pop(match)
+            if remaining:
+                raise TrainingError("YOLO and COCO annotations differ. Rerun conversion and detection validation.")

@@ -138,7 +138,7 @@ def check(
 
 def validate_detection(
     manifest: Path, dataset: Path, out: Path, *, tolerance: float = 1e-6,
-    progress: Progress | None = None,
+    progress: Progress | None = None, include_test: bool = False,
 ) -> dict[str, object]:
     if not math.isfinite(tolerance) or tolerance < 0:
         raise ValueError("Detection tolerance must be finite and non-negative.")
@@ -146,9 +146,10 @@ def validate_detection(
     selected = detection_candidates(manifest)
     if not selected:
         raise ValueError("No candidate rows; check manifest flags.")
-    grouped: dict[str, list[CsvRow]] = {"train": [], "val": []}
+    split_map = SPLIT_MAP | ({"test": "test"} if include_test else {})
+    grouped: dict[str, list[CsvRow]] = {split: [] for split in split_map.values()}
     for r in selected:
-        mapped = SPLIT_MAP.get(r["split"])
+        mapped = split_map.get(r["split"])
         if not mapped:
             raise ValueError(f"Unknown manifest split: {r['split']}")
         grouped[mapped].append(r)

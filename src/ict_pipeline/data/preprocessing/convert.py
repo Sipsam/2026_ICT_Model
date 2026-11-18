@@ -61,6 +61,7 @@ def convert_detection(
     root: Path, manifest: Path, out: Path, *, image_mode: Literal["link", "copy"] = "copy",
     limit: int = 0, dry_run: bool = False, progress: Progress | None = None,
     published_out: Path | None = None, restrict_sources: bool = True,
+    include_test: bool = False, portable_yaml: bool = False,
 ) -> dict[str, object]:
     root, manifest, out = root.resolve(), manifest.resolve(), out.resolve()
     if limit < 0:
@@ -70,11 +71,13 @@ def convert_detection(
         rows = rows[:limit]
     if not rows:
         raise ValueError("No candidate rows; check manifest flags")
+    split_map = SPLIT_MAP | ({"test": "test"} if include_test else {})
+    splits = tuple(split_map.values())
     seen = set()
     split_counts = Counter()
     for r in rows:
         split = r.get("split")
-        if split not in SPLIT_MAP:
+        if split not in split_map:
             raise ValueError(f"Unknown split: {split}")
         stem = r["sample_id"]
         if not safe_component(stem):
@@ -90,15 +93,15 @@ def convert_detection(
         require_separate_output(root, out)
     out.mkdir(parents=True, exist_ok=False)
     for typ in ("yolo", "coco"):
-        for split in ("train", "val"):
+        for split in splits:
             (out / typ / "images" / split).mkdir(parents=True, exist_ok=True)
-    for split in ("train", "val"):
+    for split in splits:
         (out / "yolo" / "labels" / split).mkdir(parents=True, exist_ok=True)
     (out / "coco" / "annotations").mkdir(parents=True, exist_ok=True)
 
     coco = {split: {"images": [], "annotations": [], "categories": [
         {"id": i + 1, "name": name, "supercategory": "smt_defect"} for i, name in enumerate(NAMES)
-    ]} for split in ("train", "val")}
+    ]} for split in splits}
     image_ids = Counter()
     annotation_ids = Counter()
     stats = Counter()
@@ -106,7 +109,7 @@ def convert_detection(
     if progress:
         progress(0, len(rows))
     for done, r in enumerate(rows, 1):
-        split = SPLIT_MAP[r["split"]]
+        split = split_map[r["split"]]
         stem = r["sample_id"]
         src_image = (root / r["image_path"]).resolve()
         src_json = (root / r["annotation_path"]).resolve()
@@ -143,15 +146,15 @@ def convert_detection(
             stats[f"background_images_{split}"] += 1
         if progress:
             progress(done, len(rows))
-    for split in ("train", "val"):
-        filename = "instances_train.json" if split == "train" else "instances_val.json"
+    for split in splits:
+        filename = f"instances_{split}.json"
         with (out / "coco" / "annotations" / filename).open("w", encoding="utf-8") as f:
             json.dump(coco[split], f, ensure_ascii=False)
-    # Output absolute path to avoid CWD-dependent Ultralytics resolution.
+    # Preserve the legacy absolute path. Revision exports use paths relative to the YAML.
     yolo_dir = ((published_out or out) / "yolo").resolve()
     (out / "yolo" / "data.yaml").write_text(
-        "path: " + json.dumps(yolo_dir.as_posix(), ensure_ascii=False) + "\n"
-        "train: images/train\nval: images/val\n"
+        ("" if portable_yaml else "path: " + json.dumps(yolo_dir.as_posix(), ensure_ascii=False) + "\n")
+        + "train: images/train\nval: images/val\n"
         "names:\n" + "".join(f"  {i}: {name}\n" for i, name in enumerate(NAMES)),
         encoding="utf-8",
     )

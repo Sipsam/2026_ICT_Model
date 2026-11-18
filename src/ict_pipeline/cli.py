@@ -17,6 +17,7 @@ from rich.text import Text
 from .config.settings import SetupError, merge_settings, validate_settings
 from .data.commands import data_app, dataset_paths, provider_for, show_download_plan
 from .data.ingestion import Acquisition, has_dataset
+from .data.integrity_commands import integrity_app
 from .data.model import DataError, load_selection
 from .data.stages import DataStages
 from .environment.doctor import collect_environment
@@ -42,6 +43,7 @@ app = typer.Typer(
 
 
 app.add_typer(data_app, name="data")
+app.add_typer(integrity_app, name="integrity")
 app.add_typer(runs_app, name="runs")
 app.add_typer(runtime_app, name="runtime")
 app.command()(status)
@@ -215,7 +217,7 @@ class DetectorOptions:
 def _pipeline(
     config: Path | None, run_id: str | None, approve_download: bool = False, approve_train: bool = False,
     *, detector_options: DetectorOptions | None = None, approve_detection: bool = False,
-    resume: bool = False,
+    resume: bool = False, split_bundle: Path | None = None,
 ) -> tuple[StageRunner, DetectionStages | None, RunState | None]:
     from .config.storage import SetupFiles
 
@@ -244,7 +246,7 @@ def _pipeline(
             except (OSError, RuntimeError, ValueError):
                 raise SetupError(f"Cannot resolve {key}. Check the path and permissions.") from None
     data = None
-    if settings["dataset_source"] != "skip":
+    if settings["dataset_source"] != "skip" and split_bundle is None:
         selection = load_selection()
         raw_root, dataset = dataset_paths(root, selection, credentials, None, Path(settings["data_path"]))
         settings["raw_path"] = raw_root.as_posix()
@@ -254,10 +256,21 @@ def _pipeline(
             acquisition, provider_for(credentials, os.environ), existing, approve_download,
             lambda missing: show_download_plan(acquisition, missing),
         )
+    def select_bundle(bundle: Path) -> Path:
+        credentials.protect_path(str(bundle), "split bundle path")
+        bundle = (root / bundle).resolve()
+        credentials.protect_path(str(bundle), "resolved split bundle path")
+        settings["detection_split_bundle"] = bundle.as_posix()
+        return bundle
+
+    if split_bundle is not None:
+        split_bundle = select_bundle(split_bundle)
+
     def build(detectors: DetectionStages | None) -> StageRunner:
         stages = pipeline_stages(
             data=data, dataset_root=Path(settings["data_path"]) if data is None else None,
             classification=resolved.classification, approve_train=approve_train, detectors=detectors,
+            split_bundle=split_bundle,
         )
         return StageRunner(stages, root, settings, on_event=_pipeline_progress, credentials=credentials)
 
@@ -265,8 +278,10 @@ def _pipeline(
     if resume:
         runner = build(None)
         saved = runner.status(run_id)
+        if saved_bundle := saved.configuration.get("detection_split_bundle"):
+            split_bundle = select_bundle(Path(saved_bundle))
         if not set(saved.selection).intersection(DETECTION_STAGES) or "detection_training" not in saved.configuration:
-            return runner, None, saved
+            return build(None) if split_bundle else runner, None, saved
         training = saved.configuration["detection_training"]
         names = tuple(ModelName(name) for name in training["models"])
         directory = Path(training["config_dir"]) if training["config_dir"] is not None else None
@@ -356,6 +371,7 @@ def run(
     config_dir: Annotated[Path | None, typer.Option(help="Read detector YAML profiles from this directory.")] = None,
     evaluation_image_size: Annotated[int, typer.Option(help="Shared Validation inference image size.")] = 640,
     evaluation_device: Annotated[EvaluationDevice, typer.Option(help="Shared Validation inference device.")] = "cpu",
+    split_bundle: Annotated[Path | None, typer.Option(help="Use a verified split bundle published with --export-detection.")] = None,
 ) -> None:
     if model is not None and all_models:
         raise typer.BadParameter("Select --model or --all.")
@@ -368,6 +384,7 @@ def run(
         runner, detectors, _ = _pipeline(
             config, run_id, approve_download, approve_train,
             detector_options=options, approve_detection=approve_detection_train,
+            split_bundle=split_bundle,
         )
         if (
             not only and start is None and CLASSIFICATION_STAGES[0] in runner.graph.stages
@@ -380,7 +397,9 @@ def run(
         elif not only and "validate_detection" in runner.graph.stages:
             order = runner.graph.order
             preparation = order[:order.index("validate_detection") + 1]
-            if start is None and runner.settings["dataset_source"] == "skip" and until not in {"download", "extract"}:
+            if start is None and split_bundle is not None:
+                start = "validate_detection"
+            elif start is None and runner.settings["dataset_source"] == "skip" and until not in {"download", "extract"}:
                 start = "audit"
             if until is None and (start is None or start in preparation):
                 until = "validate_detection"

@@ -53,7 +53,7 @@ def json_readings(raw: object, label: int) -> tuple[Reading, ...]:
     return tuple(series)
 
 
-def xlsx_readings(path: Path, label: int) -> tuple[Reading, ...]:
+def xlsx_readings(path: Path, label: int | None) -> tuple[Reading, ...]:
     from openpyxl import load_workbook
 
     try:
@@ -72,7 +72,7 @@ def xlsx_readings(path: Path, label: int) -> tuple[Reading, ...]:
                 raise SampleIssue("invalid_xlsx_sensor_columns")
             series = []
             for row in rows:
-                if labels:
+                if labels and label is not None:
                     check_label(row[labels[0]], label)
                 series.append(reading(row[columns[0]], tuple(row[index] for index in columns[1:])))
         finally:
