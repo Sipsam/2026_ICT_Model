@@ -382,3 +382,131 @@ def test_tensor_resume_contract_without_optimizer_steps(
     torch.save(payload, epoch / "resume.pt")
     with pytest.raises(ValueError, match="architecture, or preprocessing"):
         restored.restore(epoch, receipt)
+
+
+@pytest.mark.parametrize("branch", ("image", "paired"))
+def test_fpn_cpu_training_and_reload(
+    tmp_path: Path, profile: ProductTrainingConfig, branch: str, ready: None,
+) -> None:
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("torchvision")
+    from ict_pipeline.data.preprocessing.leakage import file_sha
+    from ict_pipeline.evaluation.product import compare_experiments
+    from ict_pipeline.multimodal.checkpoint import load_checkpoint
+    from ict_pipeline.multimodal.dataset import collate
+    from ict_pipeline.multimodal.fpn import ARCHITECTURE, FORMAT, build_detector, load_detector
+    from ict_pipeline.multimodal.model_config import FPNDetectorConfig, FusionConfig, ImageEncoderConfig
+    from ict_pipeline.multimodal.training_plan import DetectorInitialization
+    from ict_pipeline.multimodal.training_torch import training_engine
+
+    threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        spec = FPNDetectorConfig(image_size=64)
+        detector = build_detector(spec)
+        path = tmp_path / "best.pt"
+        torch.save({
+            "format": FORMAT, "architecture": ARCHITECTURE, "epoch": 1, "best_epoch": 1,
+            "best_loss": 0.1, "val_loss": 0.1, "model": detector.state_dict(), "optimizer": {}, "scaler": {},
+        }, path)
+        sha256 = file_sha(path)
+        image = ImageEncoderConfig(kind="faster_rcnn_fpn", freeze_backbone=True, detector=spec)
+        common = profile.architecture.model_copy(update={"target_policy": "smt-view-class-presence-v1"})
+        architecture = common.model_copy(update={
+            "image": image, "fusion": FusionConfig(kind="concat" if branch == "paired" else "late"),
+        })
+        validation = profile.validation.model_copy(update={"frequency": "each_epoch"})
+        settings = {
+            "branch": branch, "validation": validation, "checkpoint_policy": "best_validation",
+            "selection_metric": "macro_auroc",
+        }
+        rgb_plan = _plan(profile.model_copy(update={**settings, "architecture": common}), tmp_path)
+        config = ProductTrainingConfig.model_validate({
+            **dict(profile), **settings, "architecture": architecture,
+            "detector_initialization": DetectorInitialization(path=path, sha256=sha256),
+        })
+        plan = _plan(config, tmp_path)
+        assert plan.frozen.identity == rgb_plan.frozen.identity
+        assert plan.state.fingerprint == rgb_plan.state.fingerprint
+        assert plan.manifest["samples"] == rgb_plan.manifest["samples"]
+        assert plan.checkpoint_bytes > rgb_plan.checkpoint_bytes
+        assert plan.estimated_device_bytes > rgb_plan.estimated_device_bytes
+
+        epoch = tmp_path / "fpn-epoch"
+        epoch.mkdir()
+        with training_engine(plan) as engine:
+            model = engine.model
+            backbone = model.image_encoder.backbone
+            initial = {name: value.clone() for name, value in backbone.state_dict().items()}
+            for name, value in detector.backbone.state_dict().items():
+                torch.testing.assert_close(initial[name], value, rtol=0, atol=0)
+            model.train()
+            assert all(not module.training for module in backbone.modules())
+            assert all(not param.requires_grad for param in backbone.parameters())
+            params = dict(model.named_parameters())
+            trainable = ["image_encoder.projection.weight"]
+            if branch == "paired":
+                trainable.extend(name for name in params if name.startswith(("fusion.", "sensor_encoder.")))
+            else:
+                trainable.append("image_head.weight")
+            before = {name: params[name].detach().clone() for name in trainable}
+            assert engine.train_epoch(1, _noop) > 0
+            assert any(not torch.equal(before[name], params[name]) for name in trainable if name.startswith("image_encoder."))
+            for prefix in (("fusion.", "sensor_encoder.") if branch == "paired" else ("image_head.",)):
+                assert any(not torch.equal(before[name], params[name]) for name in trainable if name.startswith(prefix))
+            for name, value in backbone.state_dict().items():
+                torch.testing.assert_close(initial[name], value, rtol=0, atol=0)
+            engine.save(epoch, 1)
+            checkpoint_sha = file_sha(epoch / "model.pt")
+            report = engine.evaluate(checkpoint_sha, _noop)
+            training._check_report(plan, report, checkpoint_sha)
+            assert len(report.classification_metrics) == 5
+            assert training.selection_metric(plan, report) is not None
+            batch = collate([plan.validation[0]])
+            with torch.inference_mode():
+                scores = model(batch).for_branch(branch)[0].sigmoid()
+                reloaded = load_checkpoint(epoch / "model.pt", plan.state)
+                assert torch.equal(scores, reloaded(batch).for_branch(branch)[0].sigmoid())
+            receipt = training.EpochReceipt(
+                compatibility=plan.compatibility, execution="a" * 64, epoch=1, previous=None,
+                training_loss=0.1, elapsed_seconds=0.0, model_sha256=checkpoint_sha,
+                resume_sha256=file_sha(epoch / "resume.pt"), validation_sha256=None, validation_metric=None,
+            )
+        with training_engine(plan) as engine:
+            engine.restore(epoch, receipt)
+            assert engine.scheduler.last_epoch == 1
+            assert engine.evaluate(checkpoint_sha, _noop).prediction_fingerprint == report.prediction_fingerprint
+            assert engine.train_epoch(2, _noop) > 0
+        with training_engine(rgb_plan) as engine:
+            engine.train_epoch(1, _noop)
+            rgb_report = engine.evaluate("a" * 64, _noop).model_copy(update={"experiment_id": "rgb"})
+        assert len(compare_experiments((report, rgb_report), compare_image_encoders=True)) == 2
+        with pytest.raises(ValueError, match="identical frozen"):
+            compare_experiments((report, rgb_report.model_copy(update={
+                "protocol": rgb_report.protocol.model_copy(update={"threshold": 0.25}),
+            })), compare_image_encoders=True)
+
+        if branch == "paired":
+            config_path = tmp_path / "fpn.json"
+            config_path.write_text(config.model_copy(update={"epochs": 1}).model_dump_json(), encoding="utf-8")
+            args = ["multimodal", "train", "--config", str(config_path), "--out", str(plan.output)]
+            preview = CliRunner().invoke(app, [*args, "--dry-run"])
+            assert preview.exit_code == 0, preview.output
+            payload = json.loads(preview.stdout)
+            assert payload["preflight"]["ready"] and payload["detector_initialization"]["sha256"] == sha256
+            assert not plan.output.exists()
+            executed = CliRunner().invoke(app, [*args, "--approve-train"])
+            assert executed.exit_code == 0, executed.output
+            metadata = json.loads((plan.output / "run.json").read_bytes())
+            assert metadata["selected_checkpoint"]["epoch"] == 1
+            assert (plan.output / metadata["selected_checkpoint"]["path"]).is_file()
+            assert metadata["validation_report"]["macro_auroc"] is not None
+            assert metadata["validation_report"]["macro_f1"] is not None
+
+        with pytest.raises(ValueError, match="SHA-256"):
+            load_detector(path, "0" * 64, spec)
+        with pytest.raises(ValueError, match="detector layout"):
+            load_detector(path, sha256, FPNDetectorConfig(image_size=64, layout="pretrained"))
+        assert file_sha(path) == sha256
+    finally:
+        torch.set_num_threads(threads)

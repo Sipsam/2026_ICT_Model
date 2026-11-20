@@ -2,7 +2,7 @@
 
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Literal, Self
 
@@ -41,6 +41,11 @@ class ValidationConfig(Contract):
     frequency: Literal["final", "each_epoch"] = "final"
 
 
+class DetectorInitialization(Contract):
+    path: Path
+    sha256: Fingerprint
+
+
 class ProductTrainingConfig(Contract):
     schema_version: SchemaVersion = 1
     source: Path
@@ -51,6 +56,7 @@ class ProductTrainingConfig(Contract):
     preprocessing: Path
     architecture: ArchitectureConfig
     branch: Branch
+    detector_initialization: DetectorInitialization | None = None
     missing_train: Literal["error", "drop"] = "error"
     optimizer: OptimizerConfig = OptimizerConfig()
     scheduler: SchedulerConfig = SchedulerConfig()
@@ -69,8 +75,13 @@ class ProductTrainingConfig(Contract):
             self.validation is None or self.validation.frequency != "each_epoch"
         ):
             raise ValueError("Best Validation checkpoint selection requires frozen Validation every epoch.")
-        if self.architecture.image.kind != "rgb_grid":
-            raise ValueError("Product training currently requires the RGB grid encoder.")
+        if self.architecture.image.kind == "faster_rcnn_fpn":
+            if self.architecture.image.detector is None or self.detector_initialization is None:
+                raise ValueError("FPN training requires image.detector and a pinned detector initialization checkpoint.")
+            if self.branch not in ("image", "paired"):
+                raise ValueError("FPN training requires the image or paired branch.")
+        elif self.detector_initialization is not None:
+            raise ValueError("Detector initialization requires the FPN encoder.")
         if self.branch == "image" and self.architecture.sensor.kind != "mlp":
             raise ValueError("Use the default MLP placeholder for image-only training.")
         return self
@@ -90,6 +101,8 @@ class ProductTrainingPlan:
     estimated_host_bytes: int
     estimated_device_bytes: int
 
+    image_input_contract: dict[str, object] = field(default_factory=dict)
+
     def validation_protocol(self) -> ProductProtocol:
         if self.frozen is None:
             raise ValueError("Configure a frozen Validation cohort before scoring.")
@@ -98,7 +111,7 @@ class ProductTrainingPlan:
         return ProductProtocol(
             cohort=self.frozen.identity, target_policy=architecture.target_policy,
             threshold=architecture.fusion.threshold, preprocessing_fingerprint=self.state.fingerprint,
-            image_preprocessing_fingerprint=image_preprocessing_fingerprint(architecture.image, {}),
+            image_preprocessing_fingerprint=image_preprocessing_fingerprint(architecture.image, self.image_input_contract),
             alignment_policy="audited_pair_decision_window-v1" if offline else "verified_receipt_at_capture-v1",
         )
 
@@ -274,21 +287,26 @@ def plan_training(
     config: ProductTrainingConfig, output: Path, *, workspace: Path, progress: Progress,
 ) -> ProductTrainingPlan:
     config = config.model_copy(update={
-        name: (workspace / getattr(config, name)).resolve()
+        name: (workspace / getattr(config, name).expanduser()).resolve()
         for name in ("source", "bundle", "cohort", "preprocessing")
     })
     if config.validation is not None:
         config = config.model_copy(update={"validation": config.validation.model_copy(update={
-            "cohort": (workspace / config.validation.cohort).resolve(),
+            "cohort": (workspace / config.validation.cohort.expanduser()).resolve(),
         })})
-    output = (workspace / output).absolute()
+    initialization = config.detector_initialization
+    if initialization is not None:
+        initialization = initialization.model_copy(update={"path": (workspace / initialization.path.expanduser()).resolve()})
+        config = config.model_copy(update={"detector_initialization": initialization})
+    output = (workspace / output.expanduser()).absolute()
     _reject_link(output)
     output = output.resolve()
     if not valid_id(output.name):
         raise ValueError("Use a run directory name with up to 64 lowercase letters, digits, underscores, or hyphens.")
     protect_source_data(output, workspace)
     for path in (config.source, config.bundle, config.cohort, config.preprocessing,
-                 *((config.validation.cohort,) if config.validation else ())):
+                 *((config.validation.cohort,) if config.validation else ()),
+                 *((initialization.path,) if initialization else ())):
         require_separate_output(path, output)
         require_separate_output(output, path)
     frozen = read_artifact(config.validation.cohort, FrozenValidation) if config.validation else None
@@ -302,35 +320,61 @@ def plan_training(
         raise ValueError("The frozen Train state contains no observed measurements.")
     train, validation, counts = _views(config, cohort, state, frozen)
 
+    architecture = config.architecture
+    image_contract: dict[str, object] = {}
+    provenance: dict[str, object] = {}
+    fpn_state_bytes = fpn_activations = detector_load_bytes = 0
+    if initialization is not None and architecture.image.detector is not None:
+        try:
+            from .encoders import FasterRCNNImageEncoder
+            from .fpn import ARCHITECTURE, FORMAT, load_detector
+
+            detector = load_detector(initialization.path, initialization.sha256, architecture.image.detector)
+            encoder = FasterRCNNImageEncoder(architecture.image, detector)
+        except (ImportError, RuntimeError) as exc:
+            raise ValueError("FPN preflight requires a working PyTorch and TorchVision installation.") from exc
+        image_contract = encoder.input_contract
+        fpn_state_bytes = sum(t.numel() * t.element_size() for t in encoder.backbone.state_dict().values())
+        detector_load_bytes = 2 * initialization.path.stat().st_size
+        padded_side = (architecture.image.detector.image_size + 31) // 32 * 32
+        # Allow for feature maps and resize workspaces. The encoder processes
+        # images serially, and a frozen backbone retains no activation graph.
+        fpn_activations = padded_side**2 * (256 if architecture.image.freeze_backbone else 1024 * config.batch_size)
+        provenance = {"format": FORMAT, "architecture": ARCHITECTURE, "sha256": initialization.sha256}
+
     package = Path(__file__).resolve().parents[1]
     code = digest_json({p.relative_to(package).as_posix(): fingerprint_path(p) for p in package.rglob("*.py")})
-    runtime = runtime_snapshot(workspace, ("torch",))
+    runtime = runtime_snapshot(workspace, ("torch", "torchvision") if provenance else ("torch",))
     environment = {
         "python": runtime["python"], "packages": runtime["packages"], "os": runtime["os"],
     }
     settings = config.model_dump(mode="json")
     for key in ("source", "bundle", "cohort", "preprocessing"):
         settings.pop(key)
+    if initialization is not None:
+        settings["detector_initialization"].pop("path")
     if settings["validation"]:
         settings["validation"].pop("cohort")
     identity = {
         "profile": settings, "dataset_fingerprint": cohort.input_fingerprint,
         "split_fingerprint": cohort.split_fingerprint, "seal_fingerprint": seal,
         "preprocessing_fingerprint": state.fingerprint, "train_state_fingerprint": state.training_fingerprint,
-        "architecture_fingerprint": digest_json([config.architecture.fingerprint, {}]),
+        "architecture_fingerprint": digest_json([architecture.fingerprint, image_contract]),
         "validation_identity": frozen.identity.model_dump(mode="json") if frozen else None,
         "samples": counts, "code_fingerprint": code, "runtime_identity": environment,
         "label_policy": label_policy(),
     }
+    if provenance:
+        identity["detector_initialization"] = provenance
+        identity["image_input_contract"] = image_contract
     # Conservative allowances for RGB decode, FP32 parameters, AdamW state,
     # activations and the two retained files in each committed epoch.
-    architecture = config.architecture
     sensor_width = architecture.sensor.hidden_dim
     sensor_dim = architecture.sensor.embedding_dim
     image_dim = architecture.image.embedding_dim
     fusion_width = architecture.fusion.hidden_dim
     params = (8 * sensor_width * (sensor_width + sensor_dim + 64)
-              + image_dim * (3 * architecture.image.grid_size**2 + 8)
+              + image_dim * ((256 if provenance else 3 * architecture.image.grid_size**2) + 8)
               + 8 * (image_dim + sensor_dim + 8) * (fusion_width + image_dim + 8))
     max_pixels = max((row.image_size[0] * row.image_size[1] for view in (train, validation) if view
                       for row in view.records), default=0) if config.branch != "sensor" else 0
@@ -338,12 +382,18 @@ def plan_training(
                      if row.sequence is not None), default=0)
     model_bytes = params * 32 + config.batch_size * (max_steps * (sensor_width + 64) * 32
                                                     + architecture.image.grid_size**2 * 48)
-    host_bytes = 128 * MIB + model_bytes + config.batch_size * (max_pixels * 8 + image_bytes)
+    fpn_optimizer_bytes = 0 if architecture.image.freeze_backbone else 2 * fpn_state_bytes
+    # Resizing transfers one decoded image to the device before scaling.
+    model_bytes += 2 * fpn_state_bytes + 2 * fpn_optimizer_bytes + fpn_activations
+    if provenance:
+        model_bytes += max_pixels * 24
+    host_bytes = 128 * MIB + model_bytes + detector_load_bytes + config.batch_size * (max_pixels * 8 + image_bytes)
+    checkpoint_bytes = params * 24 + MIB + fpn_state_bytes + fpn_optimizer_bytes
     return ProductTrainingPlan(
         config, output, state, train, validation, frozen,
         {"schema_version": 1, "task": "product_classification", **identity,
          "configuration": config.model_dump(mode="json"), "runtime": runtime},
-        digest_json(identity), params * 24 + MIB, host_bytes, 128 * MIB + model_bytes,
+        digest_json(identity), checkpoint_bytes, host_bytes, 128 * MIB + model_bytes, image_contract,
     )
 
 

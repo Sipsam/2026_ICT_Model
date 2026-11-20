@@ -96,7 +96,7 @@ validation:
 
 Use `missing_train: drop` to explicitly omit rows with missing modalities, invalid targets, or too few observed timestamps. The manifest records used and candidate counts. Ambiguous pairing is rejected for eligible sensor or paired rows. Audited quarantines are excluded. `smt-target-defect-presence-v1` projects the presence of any canonical target class. `smt-view-class-presence-v1` projects five independent class-presence labels. Empty canonical annotations represent the negative case. Inputs exclude `defect_detected`, identifiers, and bounding boxes. Product checkpoints emit presence scores. Spatial predictions still come from the existing detector.
 
-`scheduler.kind: step` multiplies the learning rate by `gamma` every `step_size` epochs. Accumulated gradients are weighted by microbatch row counts, including the last partial group. The current runner uses deterministic FP32 operations, seeded initialization and shuffling, and RGB-grid image encoding. Pooled Faster R-CNN training would require a separately pinned product initialization and transform contract. Its existing encoder and inference interfaces remain available.
+`scheduler.kind: step` multiplies the learning rate by `gamma` every `step_size` epochs. Accumulated gradients are weighted by microbatch row counts, including the last partial group. The runner uses deterministic FP32 operations and seeded initialization and shuffling. It supports RGB-grid and pooled Faster R-CNN FPN image encoding.
 
 For live capture-time GRU use a causal lookback with verified availability by capture. A positive capture-through-decision window allows a separate offline experiment at the declared decision horizon. Its report binds the audited source and frozen window, and uses a distinct protocol from capture-time serving. The existing provider capture-time state yields only one observed step. [Sensor window and batch contracts](multimodal-data.md)
 
@@ -111,6 +111,66 @@ The approval commands are for future authorized execution. Dry-run prints the re
 
 Start with a reviewed development cohort and fixed-epoch sensor MLP and RGB baselines. Then compare late, concat, and gated runs using the same frozen Validation protocol. Where a controlled comparison calls for identical Train samples, use an approved common paired revision with identical branch eligibility. Consider a GRU only after confirming observed temporal coverage and decision time. Keep final benchmark Validation independent of model-selection experiments.
 
+## Faster R-CNN FPN on the original AI Hub split
+
+Use the [image-only profile](profiles/fpn-image-only.yaml) or the
+[paired concat profile](profiles/fpn-sensor-concat.yaml). Both pool
+FPN level 0 and freeze the entire detector backbone, including the FPN and
+normalization state. The image-only objective updates the projection and image
+head. The paired objective updates the projection, Sensor MLP and concat head.
+Both profiles use the same detector checkpoint and five-class target policy.
+
+Before running, fill the placeholders in both profiles from the existing
+original-split artifacts:
+
+| Profile field | Value to copy |
+| --- | --- |
+| `revision_id` | `split.json` ? `revision_id` |
+| `cohort_fingerprint` | `training-cohort.json` ? top-level `fingerprint` |
+| `architecture.preprocessing_fingerprint` | `sensor-state.json` ? top-level `fingerprint` |
+| `validation.fingerprint` | `read_artifact(path, FrozenValidation).identity.cohort_fingerprint` for `frozen-validation.json` |
+| `detector_initialization.sha256` | Raw file SHA-256 of the specified detector `best.pt` from `sha256sum` or `Get-FileHash -Algorithm SHA256` (lowercase). |
+
+Check the detector run's `configuration.image_size` and
+`configuration.initialization` and set `architecture.image.detector.image_size`
+and `layout` accordingly. If available, verify `fingerprint_path(best_pt)` from
+`ict_pipeline.pipeline.store` against `checkpoints.best.fingerprint` in
+the detector's `run.json`. This is a separate fingerprint from the raw file SHA-256. The checked-in values use the detector adapter's
+640-pixel scratch defaults provisionally. The checkpoint's state dictionary
+does not store the resize size. Set `source` to the extracted root on the
+execution host. Use the same original-split bundle, frozen Train sensor state,
+and frozen Validation artifact in both profiles. The expected dry-run counts
+are 13,051 Train and 1,645 Validation, with no Test view.
+
+```bash
+export CUBLAS_WORKSPACE_CONFIG=:4096:8
+ict multimodal train --config docs/profiles/fpn-image-only.yaml --out runs/product/fpn-image-only --dry-run
+ict multimodal train --config docs/profiles/fpn-sensor-concat.yaml --out runs/product/fpn-sensor-concat --dry-run
+ict multimodal train --config docs/profiles/fpn-image-only.yaml --out runs/product/fpn-image-only --approve-train
+ict multimodal train --config docs/profiles/fpn-sensor-concat.yaml --out runs/product/fpn-sensor-concat --approve-train
+```
+
+Dry-run verifies the pinned detector hash, format, architecture and tensors on
+CPU. Preflight estimates accelerator memory and disk for all retained epochs.
+Batch size 1 is provisional until peak memory is measured on the target CUDA
+host. To resume an interrupted run, use the same profile and output directory
+with `--resume --dry-run`, then `--resume --approve-train` for authorized
+execution. The initializer remains read-only. The resolved path, SHA-256,
+detector architecture and image transform contract are recorded in `run.json`.
+Each staged FPN checkpoint is reloaded and checked on one sample before its
+epoch is committed. Selected product checkpoints contain the trained FPN state
+and can be reconstructed without the detector initialization file.
+
+The completed run's `validation_report` entry includes Macro AUROC and Macro
+F1. Its referenced report contains the class-level AUROC, precision, recall,
+F1 and 2?2 confusion matrix for each label. The matrix uses true labels as
+rows and predicted labels as columns, ordered negative then positive. The
+profiles use a fixed 0.5 threshold. Analyze class-specific thresholds
+separately after training. Compare existing RGB-grid and FPN reports with
+`compare_experiments(reports, compare_image_encoders=True)`. This mode checks
+the same frozen scoring protocol while permitting model-specific image transforms
+and different code revisions, which remain recorded in each report.
+
 ## Checkpoints and experiment reports
 
 - **Final epoch** selects the last configured epoch. Validation is optional. Set `frequency: final` to score only after the last Train epoch, or explicitly choose `each_epoch` for diagnostics.
@@ -120,4 +180,4 @@ Start with a reviewed development cohort and fixed-epoch sensor MLP and RGB base
 - Resume appends to the same run under a lock. It checks the pinned profile, dataset, code, runtime, device, frozen preprocessing, receipt chain and artifact hashes. It reloads the latest committed epoch even when an earlier epoch is selected for inference. Incomplete directories do not count as checkpoints, so an interrupted epoch is replayed. Changed training settings require a fresh run.
 - Product reports use the canonical per-output confusion counts, precision, recall, F1 and AUROC on the exact frozen IDs. Undefined metrics are JSON `null`. Detector box mAP uses its own report. Use `compare_experiments` for compatible product reports. Inference takes the selected `model.pt`, matching state and manifest hashes. [Checkpoint inference and report comparison](multimodal-inference.md)
 
-The runner and artifact contracts are available through `ProductTrainingConfig`, `plan_training`, `inspect_recovery`, and `execute_training` in `ict_pipeline.multimodal.training_plan` and `ict_pipeline.multimodal.training`. This implementation was checked with CPU fixtures and mocked execution. Native fitting, optimizer trajectories across an actual interruption, trained-model metrics, remote GPU operation, and production inference with trained weights remain unverified.
+The runner and artifact contracts are available through `ProductTrainingConfig`, `plan_training`, `inspect_recovery`, and `execute_training` in `ict_pipeline.multimodal.training_plan` and `ict_pipeline.multimodal.training`. CPU fixtures cover FPN fitting, checkpoint reload, epoch resume, and frozen Validation reporting. Target CUDA memory use and real-data metrics depend on the execution host and the pinned artifacts.

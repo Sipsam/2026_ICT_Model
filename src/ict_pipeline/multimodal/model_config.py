@@ -33,12 +33,25 @@ class SensorEncoderConfig(Contract):
         return self
 
 
+class FPNDetectorConfig(Contract):
+    image_size: int = Field(default=640, ge=64, multiple_of=32)
+    layout: Literal["scratch", "pretrained"] = "scratch"
+
+
 class ImageEncoderConfig(Contract):
     schema_version: SchemaVersion = 1
     kind: Literal["rgb_grid", "faster_rcnn_fpn"] = "rgb_grid"
     embedding_dim: int = Field(default=16, gt=0)
     grid_size: int = Field(default=8, ge=1, le=64)
     fpn_level: str = Field(default="0", pattern=r"^(?:[0-9]+|pool)$")
+    freeze_backbone: bool = False
+    detector: FPNDetectorConfig | None = None
+
+    @model_validator(mode="after")
+    def check_detector(self) -> Self:
+        if self.kind == "rgb_grid" and (self.freeze_backbone or self.detector is not None):
+            raise ValueError("Detector configuration and backbone freezing require the FPN encoder.")
+        return self
 
 
 class FusionConfig(Contract):
@@ -74,7 +87,13 @@ class ArchitectureConfig(Contract):
 
     @property
     def fingerprint(self) -> str:
-        return digest_json(self.model_dump(mode="json"))
+        settings = self.model_dump(mode="json")
+        # Preserve the identity of checkpoints created before the optional FPN settings.
+        if self.image.detector is None:
+            settings["image"].pop("detector")
+        if not self.image.freeze_backbone:
+            settings["image"].pop("freeze_backbone")
+        return digest_json(settings)
 
 
 class WeightStatus(Contract):

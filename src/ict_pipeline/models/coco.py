@@ -223,30 +223,35 @@ class CocoAdapter:
         return checkpoints
 
 
+def build_faster_rcnn(image_size: int, *, pretrained_layout: bool) -> Any:
+    """Build the detector layout without fetching weights."""
+    from torchvision.models.detection import fasterrcnn_mobilenet_v3_large_320_fpn
+
+    if pretrained_layout:
+        from torchvision.models.detection import FasterRCNN
+        from torchvision.models.detection.anchor_utils import AnchorGenerator
+        from torchvision.models.detection.backbone_utils import mobilenet_backbone
+
+        backbone = mobilenet_backbone(
+            backbone_name="mobilenet_v3_large", weights=None, fpn=True, trainable_layers=6,
+        )
+        anchors = AnchorGenerator(((32, 64, 128, 256, 512),) * 3, ((0.5, 1.0, 2.0),) * 3)
+        return FasterRCNN(
+            backbone, num_classes=len(NAMES) + 1, rpn_anchor_generator=anchors,
+            min_size=image_size, max_size=image_size,
+            rpn_pre_nms_top_n_test=150, rpn_post_nms_top_n_test=150, rpn_score_thresh=0.05,
+        )
+    return fasterrcnn_mobilenet_v3_large_320_fpn(
+        weights=None, weights_backbone=None, num_classes=len(NAMES) + 1,
+        min_size=image_size, max_size=image_size,
+    )
+
+
 class FasterRCNNAdapter(CocoAdapter):
     architecture = LAYOUTS["faster_rcnn"].architecture
 
     def build_model(self, config: TrainConfig) -> Any:
-        from torchvision.models.detection import fasterrcnn_mobilenet_v3_large_320_fpn
-
-        if config.initialization == "pretrained":
-            from torchvision.models.detection import FasterRCNN
-            from torchvision.models.detection.anchor_utils import AnchorGenerator
-            from torchvision.models.detection.backbone_utils import mobilenet_backbone
-
-            backbone = mobilenet_backbone(
-                backbone_name="mobilenet_v3_large", weights=None, fpn=True, trainable_layers=6,
-            )
-            anchors = AnchorGenerator(((32, 64, 128, 256, 512),) * 3, ((0.5, 1.0, 2.0),) * 3)
-            return FasterRCNN(
-                backbone, num_classes=len(NAMES) + 1, rpn_anchor_generator=anchors,
-                min_size=config.image_size, max_size=config.image_size,
-                rpn_pre_nms_top_n_test=150, rpn_post_nms_top_n_test=150, rpn_score_thresh=0.05,
-            )
-        return fasterrcnn_mobilenet_v3_large_320_fpn(
-            weights=None, weights_backbone=None, num_classes=len(NAMES) + 1,
-            min_size=config.image_size, max_size=config.image_size,
-        )
+        return build_faster_rcnn(config.image_size, pretrained_layout=config.initialization == "pretrained")
 
     def backbone(self, model: Any) -> Any:
         return model.backbone.body

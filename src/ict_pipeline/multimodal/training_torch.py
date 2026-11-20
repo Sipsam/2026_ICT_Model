@@ -30,7 +30,8 @@ def configure_optimizer(
 ) -> tuple[torch.optim.AdamW, torch.optim.lr_scheduler.StepLR]:
     config = plan.config
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=config.optimizer.learning_rate, weight_decay=config.optimizer.weight_decay,
+        (parameter for parameter in model.parameters() if parameter.requires_grad),
+        lr=config.optimizer.learning_rate, weight_decay=config.optimizer.weight_decay,
     )
     settings = config.scheduler
     scheduler = torch.optim.lr_scheduler.StepLR(
@@ -71,7 +72,16 @@ class TorchEpochEngine:
     def __init__(self, plan: ProductTrainingPlan, device: str) -> None:
         self.plan = plan
         self.device = device
-        self.model = MultimodalModel(plan.config.architecture, plan.state).to(device)
+        config = plan.config
+        detector = None
+        if config.detector_initialization is not None and config.architecture.image.detector is not None:
+            from .fpn import load_detector
+
+            initialization = config.detector_initialization
+            detector = load_detector(initialization.path, initialization.sha256, config.architecture.image.detector)
+        self.model = MultimodalModel(config.architecture, plan.state, detector=detector).to(device)
+        if self.model.image_encoder.input_contract != plan.image_input_contract:
+            raise ValueError("Image encoder preprocessing differs from the training plan.")
         self.optimizer, self.scheduler = configure_optimizer(self.model, plan)
 
     def train_epoch(self, epoch: int, progress: Progress) -> float:
@@ -111,8 +121,26 @@ class TorchEpochEngine:
         self.model.weight_status = WeightStatus(**{branch: "trained" for branch in branches})
         return total_loss / len(order)
 
+    @torch.inference_mode()
+    def _verify_reload(self, path: Path) -> None:
+        dataset = self.plan.validation if self.plan.validation is not None else self.plan.train
+        batch = collate([dataset[0]])
+        branch = self.plan.config.branch
+        was_training = self.model.training
+        try:
+            expected = _branch_logits(self.model.eval()(batch), branch, 1).sigmoid()
+            restored = load_checkpoint(path, self.plan.state, expected_config=self.plan.config.architecture)
+            actual = _branch_logits(restored.to(self.device)(batch), branch, 1).sigmoid()
+            if not torch.equal(expected, actual):
+                raise ValueError("Reloaded FPN checkpoint produced different probe predictions.")
+        finally:
+            self.model.train(was_training)
+
     def save(self, directory: Path, epoch: int) -> None:
-        save_checkpoint(directory / "model.pt", self.model)
+        checkpoint = directory / "model.pt"
+        save_checkpoint(checkpoint, self.model)
+        if self.plan.config.detector_initialization is not None:
+            self._verify_reload(checkpoint)
         with (directory / "resume.pt").open("xb") as stream:
             torch.save({
                 "format": RESUME_FORMAT, "compatibility": self.plan.compatibility, "epoch": epoch,
@@ -148,7 +176,7 @@ class TorchEpochEngine:
                 or scheduler["_last_lr"] != [optimizer["param_groups"][0]["lr"]]
                 or not 0 <= scheduler["_last_lr"][0] <= self.plan.config.optimizer.learning_rate):
             raise ValueError("Resume optimizer or scheduler configuration is incompatible.")
-        parameters = tuple(self.model.parameters())
+        parameters = tuple(parameter for parameter in self.model.parameters() if parameter.requires_grad)
         for index, state in optimizer["state"].items():
             if (type(index) is not int or not 0 <= index < len(parameters)
                     or state.keys() != {"step", "exp_avg", "exp_avg_sq"}
@@ -188,6 +216,7 @@ class TorchEpochEngine:
             progress(end, len(dataset))
         architecture = config.architecture
         protocol = self.plan.validation_protocol()
+        libraries = ("torch", "Pillow", "torchvision") if config.detector_initialization else ("torch", "Pillow")
         identity = ProductModelIdentity(
             checkpoint_format=FORMAT, checkpoint_sha256=checkpoint_hash,
             architecture_version=architecture.schema_version,
@@ -199,7 +228,7 @@ class TorchEpochEngine:
             window_policy=self.plan.state.config.window_policy, fusion=architecture.fusion.kind,
             fusion_version=architecture.fusion.schema_version,
             fusion_fingerprint=digest_json(architecture.fusion.model_dump(mode="json")), device=config.device,
-            seed=architecture.seed, libraries={name: version(name) for name in ("torch", "Pillow")},
+            seed=architecture.seed, libraries={name: version(name) for name in libraries},
         )
         pending = pending_experiment(self.plan.output.name, protocol, branch=config.branch)
         return ExperimentReport(

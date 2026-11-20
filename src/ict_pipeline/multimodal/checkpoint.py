@@ -60,6 +60,10 @@ def load_checkpoint(
     status = WeightStatus.model_validate_json(payload["weight_status"])
     if expected_config is not None and config != expected_config:
         raise ValueError("Multimodal checkpoint configuration mismatch.")
+    if config.image.detector is not None:
+        from .fpn import build_detector
+
+        detector = build_detector(config.image.detector)
     model = MultimodalModel(config, preprocessing, detector=detector if config.image.kind == "faster_rcnn_fpn" else None)
     if payload["architecture_fingerprint"] != model.architecture_fingerprint:
         raise ValueError("Multimodal checkpoint architecture fingerprint mismatch.")

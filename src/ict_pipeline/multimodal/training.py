@@ -59,10 +59,7 @@ def should_evaluate(plan: ProductTrainingPlan, epoch: int) -> bool:
 
 
 def selection_metric(plan: ProductTrainingPlan, report: ExperimentReport) -> float | None:
-    field = "f1" if plan.config.selection_metric == "macro_f1" else "auroc"
-    values = [getattr(metric, field) for metric in report.classification_metrics or ()]
-    defined = [value for value in values if value is not None]
-    return sum(defined) / len(defined) if defined else None
+    return report.macro_metric("f1" if plan.config.selection_metric == "macro_f1" else "auroc")
 
 
 def selected_epoch(plan: ProductTrainingPlan, receipts: tuple[EpochReceipt, ...]) -> EpochReceipt | None:
@@ -184,6 +181,9 @@ def _save_run(
         checkpoint = {"epoch": selected.epoch, "path": f"{folder}/model.pt", "sha256": selected.model_sha256}
         if selected.validation_sha256 is not None:
             validation_report = {"path": f"{folder}/validation.json", "sha256": selected.validation_sha256}
+            if status == "completed":
+                report = read_artifact(plan.output / validation_report["path"], ExperimentReport)
+                validation_report.update(macro_auroc=report.macro_metric("auroc"), macro_f1=report.macro_metric("f1"))
     store.write_json("run.json", store.credentials.redact({
         **plan.manifest, "compatibility": plan.compatibility, "execution": execution,
         "execution_preflight": readiness, "status": status, "stage": stage, "updated_at": timestamp(),

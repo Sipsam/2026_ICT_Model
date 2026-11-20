@@ -241,13 +241,22 @@ def evaluate_detector_artifact(
     )
 
 
-def compare_experiments(reports: Iterable[ExperimentReport]) -> tuple[ExperimentReport, ...]:
-    """Check protocol equality and preserve statuses alongside any measured metrics."""
+def compare_experiments(
+    reports: Iterable[ExperimentReport], *, compare_image_encoders: bool = False,
+) -> tuple[ExperimentReport, ...]:
+    """Compare reports, optionally permitting RGB-grid and FPN model input differences."""
     ordered = tuple(sorted(reports, key=lambda report: report.experiment_id))
     if len(ordered) < 2 or len({report.experiment_id for report in ordered}) != len(ordered):
         raise ValueError("Compare at least two distinct experiment IDs.")
     first = ordered[0]
-    if any(report.protocol != first.protocol or report.code_fingerprint != first.code_fingerprint for report in ordered):
+    if compare_image_encoders:
+        if ({report.product_model.image_encoder for report in ordered if report.product_model is not None}
+                != {"rgb_grid", "faster_rcnn_fpn"} or any(report.status != "measured" or report.product_model is None for report in ordered)):
+            raise ValueError("Image encoder comparison requires measured RGB-grid and Faster R-CNN FPN reports.")
+        if any(report.protocol.model_dump(exclude={"image_preprocessing_fingerprint"})
+               != first.protocol.model_dump(exclude={"image_preprocessing_fingerprint"}) for report in ordered):
+            raise ValueError("Image encoder comparison requires an identical frozen scoring protocol.")
+    elif any(report.protocol != first.protocol or report.code_fingerprint != first.code_fingerprint for report in ordered):
         raise ValueError("Comparison requires matching task, cohort, label policy, preprocessing and scoring protocol.")
     return ordered
 

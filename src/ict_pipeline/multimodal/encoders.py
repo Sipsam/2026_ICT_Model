@@ -179,11 +179,15 @@ class FasterRCNNImageEncoder(ImageEncoder):
             size_divisible=transform.size_divisible, fixed_size=transform.fixed_size,
         ).eval()
         self.backbone = deepcopy(detector.backbone).cpu().float().eval()
+        if config.freeze_backbone:
+            self.backbone.requires_grad_(False)
         self.projection = nn.Linear(self.backbone.out_channels, self.embedding_dim, dtype=torch.float32)
 
     def train(self, mode: bool = True) -> Self:
         super().train(mode)
         self.transform.eval()
+        if self.config.freeze_backbone:
+            self.backbone.eval()
         return self
 
     @property

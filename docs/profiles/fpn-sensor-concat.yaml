@@ -1,0 +1,44 @@
+schema_version: 1
+source: data/extracted
+bundle: ~/ict-results/smt-aihub-split-v1
+revision_id: "<revision-id>"
+cohort: ~/ict-results/smt-aihub-sensor-index-v1/training-cohort.json
+cohort_fingerprint: "<training-cohort-fingerprint>"
+preprocessing: ~/ict-results/smt-aihub-sensor-index-v1/sensor-state.json
+detector_initialization:
+  path: /home/sipsam/ict-results/detectors/4e3d985db23b48dbac634238b64b52b8/faster_rcnn/best.pt
+  sha256: "<detector-sha256>"
+branch: paired
+architecture:
+  target_policy: smt-view-class-presence-v1
+  preprocessing_fingerprint: "<sensor-state-fingerprint>"
+  seed: 42
+  image:
+    kind: faster_rcnn_fpn
+    fpn_level: "0"
+    freeze_backbone: true
+    detector:
+      # Match the originating detector run's image_size and initialization.
+      image_size: 640
+      layout: scratch
+  sensor:
+    kind: mlp
+    features: normalized_mean
+  fusion:
+    kind: concat
+    threshold: 0.5
+missing_train: error
+optimizer:
+  algorithm: adamw
+  learning_rate: 0.001
+  weight_decay: 0.0001
+epochs: 30
+# Provisional until measured on the target CUDA host.
+batch_size: 1
+device: cuda
+checkpoint_policy: best_validation
+selection_metric: macro_auroc
+validation:
+  cohort: ~/ict-results/smt-aihub-sensor-index-v1/frozen-validation.json
+  fingerprint: "<frozen-validation-fingerprint>"
+  frequency: each_epoch

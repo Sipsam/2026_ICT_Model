@@ -178,6 +178,11 @@ class ExperimentReport(Contract):
     code_fingerprint: Fingerprint
     runtime: dict[str, str]
 
+    def macro_metric(self, metric: Literal["f1", "auroc"]) -> float | None:
+        values = [getattr(row, metric) for row in self.classification_metrics or ()]
+        defined = [value for value in values if value is not None]
+        return sum(defined) / len(defined) if defined else None
+
     @model_validator(mode="after")
     def check_kind(self) -> Self:
         product = isinstance(self.protocol, ProductProtocol)
