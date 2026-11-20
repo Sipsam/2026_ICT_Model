@@ -138,3 +138,48 @@ def train(
     except (RuntimeError, KeyError, TypeError, IndexError):
         typer.echo("Product training failed. Check the input contracts and the active stage in run.json.", err=True)
         raise typer.Exit(2) from None
+
+
+@multimodal_app.command("analyze")
+def analyze_command(
+    root: Annotated[Path, typer.Option(help="Extracted SMT source root.")],
+    audit: Annotated[Path, typer.Option(help="Existing integrity leakage.json.")],
+    cohort: Annotated[Path, typer.Option(help="Exact checksummed cohort used for training.")],
+    frozen_validation: Annotated[Path, typer.Option(help="Exact FrozenValidation artifact used for selection.")],
+    out: Annotated[Path, typer.Option(help="New analysis output directory.")],
+    image_run: Annotated[Path | None, typer.Option(help="Completed FPN image-only run.")] = None,
+    concat_run: Annotated[Path | None, typer.Option(help="Completed FPN sensor concat run.")] = None,
+    mode: Annotated[str, typer.Option(help="all, leakage, groups, or ablation.")] = "all",
+    seed: Annotated[int, typer.Option(min=0)] = 42,
+    batch_size: Annotated[int, typer.Option(min=1)] = 1,
+    device: Annotated[str, typer.Option(help="Evaluation device: cpu, cuda, rocm, or mps.")] = "cpu",
+    checkpoint_dir: Annotated[Path | None, typer.Option(help="Separate directory for resumable score batches.")] = None,
+) -> None:
+    """Analyze cohort leakage, Validation subgroups and sensor dependence."""
+    from .analysis import analyze
+
+    credentials = Credentials()
+    try:
+        credentials = SetupFiles.read(Path.cwd(), None).credentials(os.environ)
+        if mode not in ("all", "leakage", "groups", "ablation") or device not in ("cpu", "cuda", "rocm", "mps"):
+            raise ValueError("Choose a supported --mode and --device. See analyze --help.")
+        runs = {}
+        if image_run is not None:
+            runs["image"] = image_run
+        if concat_run is not None:
+            runs["concat"] = concat_run
+        analyze(root, audit, cohort, frozen_validation, runs, out, mode=mode, seed=seed, batch_size=batch_size,
+                device=device, credentials=credentials, progress=lambda stage: console_progress(stage, file=sys.stderr),
+                checkpoint_dir=checkpoint_dir)
+        typer.echo(f"Published multimodal analysis to {out}")
+    except KeyboardInterrupt:
+        raise typer.Exit(130) from None
+    except ImportError:
+        typer.echo("Analysis scoring requires the existing PyTorch, torchvision and Pillow runtime.", err=True)
+        raise typer.Exit(2) from None
+    except (KeyError, TypeError, IndexError, AttributeError):
+        typer.echo("Multimodal analysis failed. Check the audit and completed run artifact schemas.", err=True)
+        raise typer.Exit(2) from None
+    except (OSError, ValueError, SetupError, TrainingError, RuntimeError) as exc:
+        typer.echo(credentials.redact_text(f"Multimodal analysis failed. {exc}"), err=True)
+        raise typer.Exit(2) from None
