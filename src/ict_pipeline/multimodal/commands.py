@@ -11,6 +11,7 @@ import yaml
 
 from ..config.settings import Credentials, SetupError
 from ..config.storage import SetupFiles
+from ..data.model import Progress
 from ..data.preprocessing.common import require_separate_output, write_json
 from ..data.preprocessing.console import console_progress, fresh_output, protect_source_data
 from ..disk import StorageError
@@ -159,6 +160,13 @@ def analyze_command(
     from .analysis import analyze
 
     credentials = Credentials()
+    active_stage = "Check analysis options and paths"
+
+    def progress(stage: str) -> Progress:
+        nonlocal active_stage
+        active_stage = credentials.redact_text(stage)
+        return console_progress(active_stage, file=sys.stderr)
+
     try:
         credentials = SetupFiles.read(Path.cwd(), None).credentials(os.environ)
         if mode not in ("all", "leakage", "groups", "ablation") or device not in ("cpu", "cuda", "rocm", "mps"):
@@ -169,17 +177,20 @@ def analyze_command(
         if concat_run is not None:
             runs["concat"] = concat_run
         analyze(root, audit, cohort, frozen_validation, runs, out, mode=mode, seed=seed, batch_size=batch_size,
-                device=device, credentials=credentials, progress=lambda stage: console_progress(stage, file=sys.stderr),
+                device=device, credentials=credentials, progress=progress,
                 checkpoint_dir=checkpoint_dir)
-        typer.echo(f"Published multimodal analysis to {out}")
+        typer.echo(credentials.redact_text(f"Published multimodal analysis to {out}"))
     except KeyboardInterrupt:
         raise typer.Exit(130) from None
     except ImportError:
-        typer.echo("Analysis scoring requires the existing PyTorch, torchvision and Pillow runtime.", err=True)
+        typer.echo(f"Multimodal analysis failed during '{active_stage}'. "
+                   "Analysis scoring requires the existing PyTorch, torchvision and Pillow runtime.", err=True)
         raise typer.Exit(2) from None
-    except (KeyError, TypeError, IndexError, AttributeError):
-        typer.echo("Multimodal analysis failed. Check the audit and completed run artifact schemas.", err=True)
+    except (KeyError, TypeError, IndexError, AttributeError) as exc:
+        # Unexpected exceptions may include raw artifact values or keys.
+        typer.echo(f"Multimodal analysis failed during '{active_stage}' ({type(exc).__name__}). "
+                   "Check the inputs for this stage.", err=True)
         raise typer.Exit(2) from None
     except (OSError, ValueError, SetupError, TrainingError, RuntimeError) as exc:
-        typer.echo(credentials.redact_text(f"Multimodal analysis failed. {exc}"), err=True)
+        typer.echo(credentials.redact_text(f"Multimodal analysis failed during '{active_stage}'. {exc}"), err=True)
         raise typer.Exit(2) from None

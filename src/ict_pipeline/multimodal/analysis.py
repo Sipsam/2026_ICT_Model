@@ -16,7 +16,8 @@ from ..config.settings import Credentials
 from ..data.model import Progress
 from ..data.preprocessing.common import require_separate_output, write_json
 from ..data.preprocessing.console import fresh_output, protect_source_data
-from ..data.preprocessing.leakage import METHODS, file_sha
+from ..data.preprocessing.leakage import METHODS, MODALITIES, file_sha
+from ..data.preprocessing.policy import SPLIT_MAP
 from ..evaluation.contracts import CLASSES
 from ..evaluation.product import _environment, _metric, classification_metrics, read_artifact
 from ..evaluation.product_protocol import ExperimentReport, FrozenValidation, ProductProtocol
@@ -139,6 +140,82 @@ def _inspect_run(
         "selected_macro_auroc": report.macro_metric("auroc"), "selected_macro_f1": report.macro_metric("f1"),
         "protocol": protocol.model_dump(mode="json"),
     }, saved["architecture_fingerprint"])
+
+
+def _load_leakage_report(raw: bytes) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw)
+    except (ValueError, RecursionError):
+        raise ValueError("leakage.json must contain a valid JSON document.") from None
+    if not isinstance(payload, dict):
+        raise ValueError("leakage.json must contain a JSON object.")
+    fingerprint = payload.get("fingerprint")
+    if (not isinstance(fingerprint, str) or len(fingerprint) != 64
+            or any(char not in "0123456789abcdef" for char in fingerprint)):
+        raise ValueError("leakage.json fingerprint must be a lowercase SHA-256 digest.")
+    report = payload.get("report")
+    if not isinstance(report, dict):
+        raise ValueError("leakage.json report must be an object.")
+    try:
+        expected = digest_json(report)
+    except RecursionError:
+        raise ValueError("leakage.json report is nested too deeply.") from None
+    if fingerprint != expected:
+        raise ValueError("leakage.json fingerprint does not match report contents.")
+    if type(report.get("schema_version")) is not int or report["schema_version"] != 1:
+        raise ValueError("leakage.json report.schema_version must be 1.")
+    if report.get("dataset") != "aihub-smt-71900":
+        raise ValueError("leakage.json report.dataset must be aihub-smt-71900.")
+    for key in ("samples", "groups", "cross_split_groups"):
+        if not isinstance(report.get(key), list):
+            raise ValueError(f"leakage.json report.{key} must be an array.")
+    if "configuration" in report and not isinstance(report["configuration"], dict):
+        raise ValueError("leakage.json report.configuration must be an object.")
+
+    samples = report["samples"]
+    for index, sample in enumerate(samples):
+        field = f"report.samples[{index}]"
+        if not isinstance(sample, dict):
+            raise ValueError(f"leakage.json {field} must be an object.")
+        split = sample.get("original_split")
+        if not isinstance(split, str) or split not in SPLIT_MAP:
+            raise ValueError(f"leakage.json {field}.original_split must be a supported provider split.")
+        if not isinstance(sample.get("sample_id"), str) or not sample["sample_id"]:
+            raise ValueError(f"leakage.json {field}.sample_id must be a nonempty string.")
+        for key in ("paths", "hashes", "groups"):
+            if not isinstance(sample.get(key), dict):
+                raise ValueError(f"leakage.json {field}.{key} must be an object.")
+        for key in MODALITIES:
+            if not isinstance(sample["paths"].get(key), str):
+                raise ValueError(f"leakage.json {field}.paths.{key} must be a string.")
+            if key in sample["hashes"] and not isinstance(sample["hashes"][key], str):
+                raise ValueError(f"leakage.json {field}.hashes.{key} must be a string.")
+
+    ids: set[str] = set()
+    cross_split: set[str] = set()
+    for index, group in enumerate(report["groups"]):
+        field = f"report.groups[{index}]"
+        if not isinstance(group, dict):
+            raise ValueError(f"leakage.json {field} must be an object.")
+        group_id = group.get("group_id")
+        if not isinstance(group_id, str) or not group_id or group_id in ids:
+            raise ValueError(f"leakage.json {field}.group_id must be a unique nonempty string.")
+        ids.add(group_id)
+        method = group.get("method")
+        if not isinstance(method, str) or method not in METHODS:
+            raise ValueError(f"leakage.json {field}.method must be a supported audit method.")
+        members = group.get("members")
+        if (not isinstance(members, list)
+                or any(type(i) is not int or not 0 <= i < len(samples) for i in members)
+                or len(set(members)) != len(members)):
+            raise ValueError(f"leakage.json {field}.members must contain unique valid sample indices.")
+        if len({samples[i]["original_split"] for i in members}) > 1:
+            cross_split.add(group_id)
+    listed = report["cross_split_groups"]
+    if (any(not isinstance(item, str) or item not in ids for item in listed)
+            or len(set(listed)) != len(listed) or set(listed) != cross_split):
+        raise ValueError("leakage.json report.cross_split_groups must list each cross-split group ID exactly once.")
+    return report
 
 
 def project_leakage(
@@ -440,11 +517,12 @@ def analyze(
     frozen = read_artifact(frozen_path, FrozenValidation)
     credentials.protect_path(json.dumps(frozen.identity.sample_ids), "Validation sample IDs")
     audit_bytes = audit_path.read_bytes()
-    audit = json.loads(audit_bytes)
+    audit = _load_leakage_report(audit_bytes)
     prepare(1, len(runs) + 1)
     inspected = {}
     leakage = {}
     for done, (role, path) in enumerate(runs.items(), 2):
+        progress(f"Verify {role} run and project leakage")
         run = _inspect_run(role, path, root, cohort_path, frozen_path, cohort, frozen)
         inspected[role] = run
         leakage[role] = project_leakage(audit, run.train, run.validation.records)
@@ -454,6 +532,7 @@ def analyze(
     for role, run in inspected.items():
         if mode == "leakage":
             break
+        progress(f"Prepare {role} checkpoint scoring")
         manufacturers = {row.sample_id: row.source_group for row in run.validation.records}
         dates = {row.sample_id: (row.capture_timestamp or "")[:10] for row in run.validation.records}
         ids = frozen.identity.sample_ids
@@ -464,6 +543,7 @@ def analyze(
                 "global_shuffle": sensor_donors(ids, manufacturers, seed, within_manufacturer=False),
             }
         scores, skipped = score_run(run, device, batch_size, donors, progress, checkpoint_dir)
+        progress(f"Compute {role} analysis metrics")
         if mode in ("all", "groups"):
             grouped.extend(
                 {"model": role, "kind": kind, "group": key, "status": "measured" if members else "empty",
@@ -488,6 +568,7 @@ def analyze(
                               "status": "skipped", "reason": reason, "sample_count": len(ids), "sample_ids": list(ids)}
                              for condition, reason in skipped.items())
 
+    progress("Assemble multimodal analysis reports")
     leakage_rows = []
     for role, result in leakage.items():
         for method, stats in result["methods"].items():
@@ -501,7 +582,7 @@ def analyze(
         })
     config = {
         "schema_version": 1, "mode": mode, "seed": seed, "batch_size": batch_size, "device": device,
-        "audit_sha256": hashlib.sha256(audit_bytes).hexdigest(), "audit_configuration": audit["configuration"],
+        "audit_sha256": hashlib.sha256(audit_bytes).hexdigest(), "audit_configuration": audit.get("configuration"),
         "cohort_fingerprint": cohort.fingerprint, "validation_identity": frozen.identity.model_dump(mode="json"),
         "models": {role: run.provenance for role, run in inspected.items()}, **_environment(),
         "group_policy": {"image_similarity": "project_provider_components-v1", "manufacturer": "cohort.source_group",

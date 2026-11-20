@@ -98,8 +98,12 @@ def test_analysis_cli(tmp_path: Path, profile: ProductTrainingConfig, monkeypatc
         {"method": "source_day", "members": members, "group_id": "overlap"},
         {"method": "capture_group", "members": [members[0], members[2]], "group_id": "held-out-only"},
     ])
+    audit["cross_split_groups"] = [
+        group["group_id"] for group in audit["groups"]
+        if len({audit["samples"][i]["original_split"] for i in group["members"]}) > 1
+    ]
     audit_path = tmp_path / "leakage.json"
-    write_json(audit_path, audit)
+    write_json(audit_path, {"fingerprint": digest_json(audit), "report": audit})
     frozen = read_artifact(profile.validation.cohort, FrozenValidation)
     candidates = {row.sample_id for row in Cohort.load(profile.cohort).records
                   if row.split == "validation" and row.detection_candidate}
@@ -127,6 +131,9 @@ def test_analysis_cli(tmp_path: Path, profile: ProductTrainingConfig, monkeypatc
             "--image-run", str(image), "--concat-run", str(concat), "--out", str(out), "--batch-size", "2"]
     result = cli.invoke(app, args)
     assert result.exit_code == 0, (result.output, result.exception)
+    config = json.loads((out / "analysis.json").read_bytes())
+    assert config["audit_configuration"] == json.loads(audit_path.read_bytes())["report"]["configuration"]
+    assert config["audit_sha256"] == file_sha(audit_path)
     leak = json.loads((out / "leakage.json").read_bytes())["models"]["concat"]
     assert extra_ids.isdisjoint(leak["validation_ids"])
     assert leak["methods"]["image_similarity"]["validation_ids"] == [original[2]["sample_id"]]
@@ -146,10 +153,59 @@ def test_analysis_cli(tmp_path: Path, profile: ProductTrainingConfig, monkeypatc
     assert {row["status"] for row in ablations} == {"measured", "skipped"}
     assert (out / "manufacturers.csv").is_file()
     assert cli.invoke(app, args).exit_code == 2
+    tampered = tmp_path / "tampered.json"
+    write_json(tampered, {"fingerprint": digest_json(audit), "report": {**audit, "samples": []}})
+    failed = cli.invoke(app, [*args, "--out", str(tmp_path / "fresh"), "--audit", str(tampered)])
+    assert failed.exit_code == 2
+    assert "Verify cohort, audit and selected checkpoints" in failed.output
+    assert "leakage.json fingerprint does not match report contents" in failed.output
+    assert not (tmp_path / "fresh").exists()
+
+    receipt = concat / "run.json"
+    original_receipt = receipt.read_bytes()
+    saved = json.loads(original_receipt)
+    del saved["selected_checkpoint"]
+    receipt.write_text(json.dumps(saved), encoding="utf-8")
+    failed = cli.invoke(app, [*args, "--out", str(tmp_path / "fresh")])
+    assert failed.exit_code == 2
+    assert "Verify concat run and project leakage" in failed.output and "(KeyError)" in failed.output
+    assert "selected_checkpoint" not in failed.output and "Traceback" not in failed.output
+    assert not (tmp_path / "fresh").exists()
+    receipt.write_bytes(original_receipt)
     (concat / "epoch-000014" / "model.pt").write_bytes(b"changed")
     failed = cli.invoke(app, [*args, "--out", str(tmp_path / "fresh")])
     assert failed.exit_code == 2 and "fingerprint mismatch" in failed.output
     assert not (tmp_path / "fresh").exists()
+
+
+@pytest.mark.parametrize(("field", "value", "message"), [
+    ("schema_version", True, "report.schema_version"),
+    ("dataset", "other", "report.dataset"),
+    ("samples", {}, "report.samples must be an array"),
+    ("samples", [{"original_split": "train", "sample_id": "sample", "paths": {}}], "report.samples[0].hashes"),
+    ("groups", None, "report.groups must be an array"),
+    ("groups", [{"group_id": "g", "method": "source_day", "members": [{}]}], "report.groups[0].members"),
+    ("cross_split_groups", {}, "report.cross_split_groups must be an array"),
+    ("cross_split_groups", ["missing"], "report.cross_split_groups must list"),
+])
+def test_leakage_report_rejects_invalid_fields(field: str, value: object, message: str) -> None:
+    report = {"schema_version": 1, "dataset": "aihub-smt-71900", "samples": [], "groups": [],
+              "cross_split_groups": [], field: value}
+    raw = json.dumps({"fingerprint": digest_json(report), "report": report}).encode()
+    with pytest.raises(ValueError) as exc_info:
+        analysis._load_leakage_report(raw)
+    assert message in str(exc_info.value)
+
+
+@pytest.mark.parametrize(("raw", "message"), [
+    (b"{", "valid JSON"),
+    (b"[]", "JSON object"),
+    (b'{"report": {}}', "fingerprint"),
+    (json.dumps({"fingerprint": "a" * 64, "report": []}).encode(), "report must be an object"),
+])
+def test_leakage_report_rejects_invalid_wrapper(raw: bytes, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        analysis._load_leakage_report(raw)
 
 
 @pytest.mark.parametrize("failure", ["count", "fingerprint", "validation_ids"])
