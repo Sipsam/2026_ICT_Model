@@ -474,6 +474,7 @@ def train(
     resume_from: Annotated[Path | None, typer.Option(help="Continue a trusted earlier ICT model run into a new directory.")] = None,
     approve_train: Annotated[bool, typer.Option("--approve-train", help="Authorize training and checkpoint writes.")] = False,
     dry_run: Annotated[bool, typer.Option(help="Preview the selected configs and output paths.")] = False,
+    group_verification: Annotated[Path | None, typer.Option(help="Passing group verification receipt for scoped Faster R-CNN training.")] = None,
 ) -> None:
     from .models.registry import REGISTRY
     from .models.training import execute_training, plan_training, training_configuration
@@ -495,7 +496,8 @@ def train(
             timings[stage] = (started, now)
 
     try:
-        plan = plan_training(Path.cwd(), names, dataset, runs_dir, config_dir, resume_from)
+        plan = plan_training(Path.cwd(), names, dataset, runs_dir, config_dir, resume_from,
+                             group_verification=group_verification)
         for name, config in plan.models.items():
             typer.echo(f"{name}   input {plan.dataset / REGISTRY[name].data_format}   output {plan.destination / name}")
             typer.echo(json.dumps(training_configuration(config)))

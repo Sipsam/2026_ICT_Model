@@ -4,16 +4,16 @@ import json
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Literal, Self
+from typing import Literal, Protocol, Self
 
 from pydantic import Field, model_validator
 
 from ..data.model import Progress
-from ..data.preprocessing.common import read_csv, require_separate_output
+from ..data.preprocessing.common import require_separate_output
 from ..data.preprocessing.console import protect_source_data
 from ..data.preprocessing.leakage import Components, file_sha, is_candidate
 from ..data.preprocessing.policy import label_policy
-from ..data.preprocessing.revision import SEAL
+from ..data.preprocessing.revision import read_publication
 from ..disk import MIB, RESERVE_BYTES, volume_at
 from ..environment.doctor import collect_environment
 from ..evaluation.product import read_artifact
@@ -57,6 +57,7 @@ class ProductTrainingConfig(Contract):
     architecture: ArchitectureConfig
     branch: Branch
     detector_initialization: DetectorInitialization | None = None
+    group_verification: Path | None = None
     missing_train: Literal["error", "drop"] = "error"
     optimizer: OptimizerConfig = OptimizerConfig()
     scheduler: SchedulerConfig = SchedulerConfig()
@@ -82,6 +83,8 @@ class ProductTrainingConfig(Contract):
                 raise ValueError("FPN training requires the image or paired branch.")
         elif self.detector_initialization is not None:
             raise ValueError("Detector initialization requires the FPN encoder.")
+        if self.group_verification is not None and (self.detector_initialization is None or self.validation is None):
+            raise ValueError("Group FPN training requires a pinned Detector and FrozenValidation.")
         if self.branch == "image" and self.architecture.sensor.kind != "mlp":
             raise ValueError("Use the default MLP placeholder for image-only training.")
         return self
@@ -147,28 +150,18 @@ def _in_training_scope(split: str, sample_id: str, validation_ids: set[str]) -> 
     return split == "train" or (split == "validation" and sample_id in validation_ids)
 
 
-def _load_index(
-    config: ProductTrainingConfig, frozen: FrozenValidation | None, progress: Progress,
-) -> tuple[Cohort, str, int]:
-    # Verify publication metadata. Hashing the detector-format trees here would
-    # open reserved Test files, which this runner does not consume.
-    revision = json.loads((config.bundle / "split.json").read_bytes())
-    seal_path = config.bundle / "detection" / SEAL
-    _reject_link(seal_path)
-    seal = json.loads(seal_path.read_bytes())
-    receipt = seal["record"]
-    rows = read_csv(config.bundle / "manifest.csv")
-    if (
-        revision["schema_version"] != 1 or revision["revision_id"] != config.revision_id
-        or digest_json({k: v for k, v in revision.items() if k != "revision_id"}) != config.revision_id
-        or digest_json(rows) != revision["selected_manifest_fingerprint"]
-        or digest_json(revision["label_policy"]) != digest_json(label_policy())
-        or receipt["schema_version"] != 1 or digest_json(receipt) != seal["fingerprint"]
-        or receipt["split"] != {k: v for k, v in revision.items() if k != "assignments"}
-        or set(receipt["formats"]) != {"yolo", "coco"}
-    ):
-        raise ValueError("Use the explicitly pinned sealed split bundle and its original manifest.")
+class IndexInputs(Protocol):
+    source: Path
+    bundle: Path
+    revision_id: str
+    cohort: Path
+    cohort_fingerprint: str
 
+
+def _load_index(
+    config: IndexInputs, frozen: FrozenValidation | None, progress: Progress, *, all_validation: bool = False,
+) -> tuple[Cohort, str, int]:
+    revision, seal, rows = read_publication(config.bundle, config.revision_id)
     raw = json.loads(config.cohort.read_bytes())
     payload = raw["cohort"]
     if raw["fingerprint"] != config.cohort_fingerprint or digest_json(payload) != config.cohort_fingerprint:
@@ -200,7 +193,9 @@ def _load_index(
                 or dict(record["groups"]).get("revision_group", "") != row["group_id"]):
             raise ValueError("Published manifest and audited cohort assignments differ.")
         sources.append([paths, _record_hashes(record)])
-        if _in_training_scope(record["split"], record["sample_id"], selected):
+        if _in_training_scope(record["split"], record["sample_id"], selected) or (
+            all_validation and record["split"] == "validation"
+        ):
             scoped.append((index, record, paths))
             if record["detection_candidate"] and not record["quarantined"]:
                 used.add(index)
@@ -212,18 +207,26 @@ def _load_index(
         raise ValueError("Source, manifest, or split fingerprint disagrees with the sealed revision.")
     _check_isolation(records, used)
 
+    reserved_paths = {
+        record[key].casefold() for record in records if record["split"] == "test"
+        for key in EXTENSIONS if record[key]
+    }
     progress(0, len(scoped))
     max_image_bytes = 0
     for done, (index, record, paths) in enumerate(scoped, 1):
-        if index in used:
+        if index in used or (all_validation and record["detection_candidate"]):
             expected = _record_hashes(record)
             for key, relative in paths.items():
                 actual = None
                 if relative:
                     portable = PurePosixPath(relative)
-                    path = (config.source / relative).resolve()
-                    if portable.is_absolute() or ".." in portable.parts or not path.is_relative_to(config.source):
-                        raise ValueError("An indexed source path escapes the extracted root.")
+                    if (portable.is_absolute() or ".." in portable.parts or ":" in relative
+                            or "\\" in relative or portable.as_posix().casefold() in reserved_paths):
+                        raise ValueError("Training input refers to a reserved or nonportable source path.")
+                    path = config.source
+                    for component in portable.parts:
+                        path = path / component
+                        _reject_link(path)
                     if path.is_file():
                         actual = file_sha(path)
                         if key == "image_path":
@@ -238,7 +241,7 @@ def _load_index(
                if (record["provider_split"], record["sample_id"], record["annotation_path"]) in keys]
     return (
         Cohort.model_validate_json(json.dumps({**payload, "records": visible})),
-        seal["fingerprint"], max_image_bytes,
+        seal, max_image_bytes,
     )
 
 
@@ -302,6 +305,10 @@ def plan_training(
     if initialization is not None:
         initialization = initialization.model_copy(update={"path": (workspace / initialization.path.expanduser()).resolve()})
         config = config.model_copy(update={"detector_initialization": initialization})
+    if config.group_verification is not None:
+        config = config.model_copy(update={
+            "group_verification": (workspace / config.group_verification.expanduser()).resolve(),
+        })
     output = (workspace / output.expanduser()).absolute()
     _reject_link(output)
     output = output.resolve()
@@ -310,7 +317,8 @@ def plan_training(
     protect_source_data(output, workspace)
     for path in (config.source, config.bundle, config.cohort, config.preprocessing,
                  *((config.validation.cohort,) if config.validation else ()),
-                 *((initialization.path,) if initialization else ())):
+                 *((initialization.path,) if initialization else ()),
+                 *((config.group_verification,) if config.group_verification else ())):
         require_separate_output(path, output)
         require_separate_output(output, path)
     frozen = read_artifact(config.validation.cohort, FrozenValidation) if config.validation else None
@@ -323,6 +331,36 @@ def plan_training(
     if not any(channel.count for channel in state.statistics):
         raise ValueError("The frozen Train state contains no observed measurements.")
     train, validation, counts = _views(config, cohort, state, frozen)
+
+    group_receipt = None
+    if config.group_verification is not None:
+        from ..data.group_retraining import read_verification_receipt
+        from ..models.weights import LAYOUTS
+
+        result, group_receipt = read_verification_receipt(config.group_verification)
+        if (
+            result["revision_id"] != config.revision_id or result["publication_fingerprint"] != seal
+            or result["cohort_fingerprint"] != config.cohort_fingerprint
+            or result["frozen_validation_fingerprint"] != config.validation.fingerprint
+            or result["preprocessing_fingerprint"] != state.fingerprint
+        ):
+            raise ValueError("Group FPN inputs differ from the passing verification receipt.")
+        run = json.loads((initialization.path.parent / "run.json").read_bytes())
+        detector_config = config.architecture.image.detector
+        revision = run.get("dataset_revision") or {}
+        checkpoints = run.get("checkpoints") or {}
+        if (
+            run.get("status") != "completed" or run.get("model") != "faster_rcnn"
+            or run.get("architecture") != LAYOUTS["faster_rcnn"].architecture
+            or revision.get("group_split_revision") != config.revision_id
+            or revision.get("group_verification") != group_receipt
+            or revision.get("detector_scope") != result["detector_scope"]
+            or run.get("initialization_mode") != detector_config.layout
+            or (run.get("configuration") or {}).get("image_size") != detector_config.image_size
+            or checkpoints.get("best") != {"path": initialization.path.name,
+                                           "fingerprint": fingerprint_path(initialization.path)}
+        ):
+            raise ValueError("Use the completed best checkpoint from the verified group Detector and match its layout.")
 
     architecture = config.architecture
     image_contract: dict[str, object] = {}
@@ -357,6 +395,9 @@ def plan_training(
         settings.pop(key)
     if initialization is not None:
         settings["detector_initialization"].pop("path")
+    settings.pop("group_verification")
+    if group_receipt:
+        settings["group_verification"] = group_receipt
     if settings["validation"]:
         settings["validation"].pop("cohort")
     identity = {

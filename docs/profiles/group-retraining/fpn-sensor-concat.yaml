@@ -1,0 +1,45 @@
+schema_version: 1
+source: data/extracted
+bundle: "<verified-group-bundle>"
+revision_id: "<revision-id>"
+cohort: "<verified-group-training-cohort>"
+cohort_fingerprint: "<training-cohort-fingerprint>"
+preprocessing: "<verified-group-train-state>"
+group_verification: "<passing-group-verification.json>"
+detector_initialization:
+  path: "<completed-group-detector-best.pt>"
+  sha256: "<detector-sha256>"
+branch: paired
+architecture:
+  target_policy: smt-view-class-presence-v1
+  preprocessing_fingerprint: "<sensor-state-fingerprint>"
+  seed: 42
+  image:
+    kind: faster_rcnn_fpn
+    fpn_level: "0"
+    freeze_backbone: true
+    detector:
+      # Match the originating detector run's image_size and initialization.
+      image_size: 640
+      layout: scratch
+  sensor:
+    kind: mlp
+    features: normalized_mean
+  fusion:
+    kind: concat
+    threshold: 0.5
+missing_train: error
+optimizer:
+  algorithm: adamw
+  learning_rate: 0.001
+  weight_decay: 0.0001
+epochs: 30
+# Provisional until measured on the target CUDA host.
+batch_size: 1
+device: cuda
+checkpoint_policy: best_validation
+selection_metric: macro_auroc
+validation:
+  cohort: "<verified-group-frozen-validation>"
+  fingerprint: "<frozen-validation-fingerprint>"
+  frequency: each_epoch

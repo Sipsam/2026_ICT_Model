@@ -4,11 +4,34 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ...pipeline.store import digest_json, fingerprint_path
+from ...pipeline.store import _reject_link, digest_json, fingerprint_path
+from .common import CsvRow, read_csv
 from .policy import label_policy
 
 SEAL = "split_revision.json"
 FORMATS = ("yolo", "coco")
+
+
+def read_publication(bundle: Path, revision_id: str) -> tuple[dict, str, list[CsvRow]]:
+    """Check publication metadata without reading either conversion tree."""
+    revision = json.loads((bundle / "split.json").read_bytes())
+    seal_path = bundle / "detection" / SEAL
+    _reject_link(seal_path.parent)
+    _reject_link(seal_path)
+    seal = json.loads(seal_path.read_bytes())
+    receipt = seal["record"]
+    rows = read_csv(bundle / "manifest.csv")
+    if (
+        revision["schema_version"] != 1 or revision["revision_id"] != revision_id
+        or digest_json({k: v for k, v in revision.items() if k != "revision_id"}) != revision_id
+        or digest_json(rows) != revision["selected_manifest_fingerprint"]
+        or digest_json(revision["label_policy"]) != digest_json(label_policy())
+        or receipt["schema_version"] != 1 or digest_json(receipt) != seal["fingerprint"]
+        or receipt["split"] != {k: v for k, v in revision.items() if k != "assignments"}
+        or set(receipt["formats"]) != set(FORMATS)
+    ):
+        raise ValueError("Use the explicitly pinned sealed split bundle and its original manifest.")
+    return revision, seal["fingerprint"], rows
 
 
 def _fingerprints(dataset: Path) -> dict[str, str]:

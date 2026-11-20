@@ -101,13 +101,7 @@ def _allocate(
     return chosen
 
 
-def plan_split(report: dict, config: SplitConfig) -> dict:
-    if report["schema_version"] != 1 or digest_json(report["label_policy"]) != digest_json(label_policy()):
-        raise ValueError("Use an analysis report with the current schema and label policy.")
-    samples = report["samples"]
-    candidates = [index for index, row in enumerate(samples) if row["candidate"]]
-    if not candidates:
-        raise ValueError("The source manifest has no detection candidates.")
+def grouping_methods(config: SplitConfig) -> list[str]:
     methods = [*REQUIRED_GROUPS, "source_capture"]
     if config.grouping in ("source-day", "manufacturer"):
         methods.append("source_day")
@@ -117,6 +111,17 @@ def plan_split(report: dict, config: SplitConfig) -> dict:
         methods.append("image_similarity")
     if config.group_near_sensors:
         methods.append("sensor_similarity")
+    return methods
+
+
+def plan_split(report: dict, config: SplitConfig) -> dict:
+    if report["schema_version"] != 1 or digest_json(report["label_policy"]) != digest_json(label_policy()):
+        raise ValueError("Use an analysis report with the current schema and label policy.")
+    samples = report["samples"]
+    candidates = [index for index, row in enumerate(samples) if row["candidate"]]
+    if not candidates:
+        raise ValueError("The source manifest has no detection candidates.")
+    methods = grouping_methods(config)
     components = Components(len(samples))
     for group in report["groups"]:
         if group["method"] in methods:

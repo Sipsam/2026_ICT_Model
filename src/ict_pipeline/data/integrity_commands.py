@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -13,6 +14,8 @@ import typer
 from ..config.settings import Credentials, SetupError
 from ..config.storage import SetupFiles
 from ..pipeline.store import digest_json
+from ..pipeline.model import PipelineError
+from ..models.contracts import TrainingError
 from .preprocessing.common import write_json
 from .preprocessing.console import console_progress, fresh_output
 from .preprocessing.leakage import AnalysisConfig, analyze_leakage
@@ -41,9 +44,56 @@ def _command(*paths: Path | None) -> Iterator[Credentials]:
     except (KeyError, TypeError, IndexError):
         typer.echo("Invalid manifest, source metadata, or leakage report schema.", err=True)
         raise typer.Exit(2) from None
-    except (ValueError, OSError, SetupError) as exc:
+    except (ValueError, OSError, SetupError, PipelineError, TrainingError) as exc:
         typer.echo(credentials.redact_text(str(exc)), err=True)
         raise typer.Exit(2) from None
+
+
+@integrity_app.command()
+def verify_group(
+    root: SourceRoot,
+    bundle: Annotated[Path, typer.Option(help="Existing published group-aware split bundle.")],
+    revision_id: Annotated[str, typer.Option(help="Expected published revision SHA-256.")],
+    cohort: Annotated[Path, typer.Option(help="Existing sanitized product training cohort.")],
+    cohort_fingerprint: Annotated[str, typer.Option(help="Expected product cohort SHA-256.")],
+    frozen_validation: Annotated[Path, typer.Option(help="Existing frozen Validation artifact.")],
+    preprocessing: Annotated[Path, typer.Option(help="Existing group Train preprocessing state.")],
+    out: Annotated[Path, typer.Option(help="Fresh directory for the group verification result.")],
+    prior_test_manifest: Annotated[list[Path] | None, typer.Option(
+        help="Earlier manifest with reserved Test rows. Repeat for each applicable reservation.",
+    )] = None,
+    checkpoint: Annotated[Path | None, typer.Option(help="Resume scoped development observations from SQLite.")] = None,
+) -> None:
+    """Verify group retraining inputs without opening Test payloads."""
+    from ..evaluation.product import read_artifact
+    from ..evaluation.product_protocol import FrozenValidation
+    from ..multimodal.preprocessing import PreprocessingState
+    from .group_retraining import GroupInputs, verify_group_retraining
+
+    root, bundle, cohort, frozen_validation, preprocessing, out = (
+        path.expanduser().resolve() for path in (root, bundle, cohort, frozen_validation, preprocessing, out)
+    )
+    prior = tuple(path.expanduser().resolve() for path in (prior_test_manifest or ()))
+    checkpoint = checkpoint.expanduser().absolute() if checkpoint else None
+    with _command(root, bundle, cohort, frozen_validation, preprocessing, out, checkpoint, *prior) as credentials:
+        if out.exists():
+            raise ValueError("Output already exists. Choose a fresh directory.")
+        if out.is_relative_to(bundle):
+            raise ValueError("Write the verification result outside the published split bundle.")
+        if checkpoint is not None and any(checkpoint.resolve().is_relative_to(path) for path in (bundle, out)):
+            raise ValueError("Choose a checkpoint outside the published split and report directories.")
+        result = verify_group_retraining(
+            GroupInputs(root, bundle, revision_id, cohort, cohort_fingerprint),
+            read_artifact(frozen_validation, FrozenValidation), PreprocessingState.load(preprocessing), credentials,
+            lambda stage: console_progress(stage, file=sys.stderr), prior_manifests=prior, checkpoint=checkpoint,
+        )
+        payload = {"verification": result, "fingerprint": digest_json(result)}
+        credentials.protect_path(json.dumps(payload), "group verification report")
+        with fresh_output(out, root) as temporary:
+            write_json(temporary / "verification.json", payload)
+        typer.echo(json.dumps(payload, indent=2))
+        if not result["passed"]:
+            raise typer.Exit(1)
 
 
 @integrity_app.command()

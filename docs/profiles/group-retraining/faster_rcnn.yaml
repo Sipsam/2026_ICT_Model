@@ -1,0 +1,10 @@
+epochs: 50
+initialization: scratch
+batch_size: 4
+image_size: 640
+optimizer: SGD
+lr: 0.005
+seed: 42
+device: cuda
+precision: fp32
+save_period: 0

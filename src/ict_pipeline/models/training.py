@@ -23,6 +23,7 @@ from pydantic import ValidationError
 
 from ..config.settings import Credentials, SetupError, is_filesystem_path
 from ..config.storage import SetupFiles
+from ..data.group_retraining import detector_scope, read_group_verification
 from ..data.preprocessing.common import require_separate_output
 from ..data.preprocessing.console import protect_source_data
 from ..data.preprocessing.policy import label_policy
@@ -170,6 +171,7 @@ class TrainingPlan:
     weight_sources: Mapping[ModelName, Path] = field(default_factory=dict)
     publish_checkpoints: bool = False
     monitor_resources: bool = False
+    group_verification: Path | None = None
 
 
 def _validate_adapter_options(name: ModelName, config: TrainConfig, device: str) -> None:
@@ -213,6 +215,7 @@ def plan_training(
     workspace: Path, names: tuple[ModelName, ...], dataset: Path, runs: Path,
     config_dir: Path | None, resume_from: Path | None, *,
     device: Literal["cpu", "cuda", "rocm", "mps"] | None = None,
+    group_verification: Path | None = None,
 ) -> TrainingPlan:
     credentials = SetupFiles.read(workspace, None).credentials(os.environ)
 
@@ -250,7 +253,14 @@ def plan_training(
             not coco.is_dir() or not coco.resolve().is_relative_to(dataset)
         ):
             raise TrainingError("Controlled training requires the generated COCO annotations.")
-    return TrainingPlan(models, dataset, destination, resume_from, credentials, workspace, weight_sources=weights)
+    revision = None
+    if group_verification is not None:
+        if names != (ModelName.FASTER_RCNN,) or models[names[0]].optimization is not None:
+            raise TrainingError("Group verification supports the non-optimized Faster R-CNN profile.")
+        group_verification = local(group_verification.expanduser(), "group verification receipt")
+        revision = read_group_verification(dataset, group_verification)
+    return TrainingPlan(models, dataset, destination, resume_from, credentials, workspace,
+                        dataset_revision=revision, weight_sources=weights, group_verification=group_verification)
 
 
 def checkpoint_paths(name: ModelName, output: Path) -> Checkpoints:
@@ -320,7 +330,12 @@ def _execute_training(plan: TrainingPlan, progress: Progress) -> Iterator[tuple[
     datasets = dict(plan.verified_data or {})
     controlled = any(config.optimization is not None for config in plan.models.values())
     try:
-        seal = read_dataset_seal(plan.dataset)
+        if plan.group_verification is not None:
+            if read_group_verification(plan.dataset, plan.group_verification) != plan.dataset_revision:
+                raise ValueError("The group verification receipt changed before training.")
+            seal = None
+        else:
+            seal = read_dataset_seal(plan.dataset)
     except ValueError as exc:
         raise TrainingError(str(exc)) from None
     if seal is not None:
@@ -330,7 +345,9 @@ def _execute_training(plan: TrainingPlan, progress: Progress) -> Iterator[tuple[
         plan = replace(plan, dataset_revision=revision)
     elif plan.dataset_revision is not None and "selected_split" in plan.dataset_revision:
         raise TrainingError("The verified split seal is missing.")
-    if seal is not None or all((plan.dataset / fmt).is_dir() for fmt in ("yolo", "coco")):
+    if plan.group_verification is None and (
+        seal is not None or all((plan.dataset / fmt).is_dir() for fmt in ("yolo", "coco"))
+    ):
         for data_format in ("yolo", "coco"):
             if data_format not in datasets:
                 datasets[data_format] = inspect_data(plan.dataset, data_format, plan.credentials, progress)
@@ -528,7 +545,8 @@ def _train_model(
                 expected = plan.dataset_revision
                 try:
                     if ("detection" in expected and fingerprint_path(plan.dataset) != expected["detection"]
-                            or "selected_split" in expected and read_dataset_seal(plan.dataset) != expected["selected_split"]):
+                            or "selected_split" in expected and read_dataset_seal(plan.dataset) != expected["selected_split"]
+                            or "detector_scope" in expected and detector_scope(plan.dataset) != expected["detector_scope"]):
                         raise ValueError
                 except (ValueError, OSError):
                     raise TrainingError("The verified detection dataset changed during training. Restore stable inputs.") from None
