@@ -28,7 +28,7 @@ from .contracts import Record
 from .dataset import MultimodalDataset, collate
 from .model_config import image_preprocessing_fingerprint
 from .preprocessing import PreprocessingState, training_fingerprint, transform_sensor
-from .training_plan import ProductTrainingConfig, _views
+from .training_plan import ProductTrainingConfig, _in_training_scope, _views
 
 AnalysisMode = Literal["all", "leakage", "groups", "ablation"]
 ModelRole = Literal["image", "concat"]
@@ -82,11 +82,28 @@ def _inspect_run(
             or state.fingerprint != profile.architecture.preprocessing_fingerprint
             or state.training_fingerprint != training_fingerprint(cohort)):
         raise ValueError(f"{role}: frozen preprocessing fingerprint mismatch.")
-    train, validation, counts = _views(profile, cohort, state, frozen)
-    if (validation is None or counts != saved["samples"]
-            or tuple(sorted(row.sample_id for row in validation.records)) != frozen.identity.sample_ids
-            or any(row.split != row.provider_split for row in (*train.records, *validation.records))):
-        raise ValueError(f"{role}: reconstructed training or Validation membership differs from the recorded split.")
+    expected_ids = frozen.identity.sample_ids
+    selected = set(expected_ids)
+    scoped = cohort.model_copy(update={"records": tuple(
+        row for row in cohort.records if _in_training_scope(row.split, row.sample_id, selected)
+    )})
+    train, validation, counts = _views(profile, scoped, state, frozen)
+    recorded = saved["samples"]
+    if not isinstance(recorded, dict):
+        raise ValueError(f"{role}: invalid run.json samples metadata.")
+    if counts != recorded:
+        mismatches = [split for split in ("train", "validation") if counts.get(split) != recorded.get(split)]
+        details = ", ".join(mismatches) or "split keys"
+        raise ValueError(f"{role}: reconstructed sample counts or sample fingerprints differ from run.json samples "
+                         f"for {details}.")
+    if validation is None:
+        raise ValueError(f"{role}: no Validation view was reconstructed for FrozenValidation.")
+    actual_ids = tuple(sorted(row.sample_id for row in validation.records))
+    if actual_ids != expected_ids:
+        raise ValueError(f"{role}: reconstructed Validation sample IDs differ from FrozenValidation "
+                         f"(expected {len(expected_ids)}, got {len(actual_ids)}).")
+    if any(row.split != row.provider_split for row in (*train.records, *validation.records)):
+        raise ValueError(f"{role}: reconstructed sample split differs from the original provider split.")
 
     selected = saved["selected_checkpoint"]
     epoch = selected["epoch"]

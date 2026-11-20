@@ -143,6 +143,10 @@ def _check_isolation(records: list[dict], used: set[int]) -> None:
             raise ValueError("Cross-split sample, capture, or sensor evidence intersects the requested cohort.")
 
 
+def _in_training_scope(split: str, sample_id: str, validation_ids: set[str]) -> bool:
+    return split == "train" or (split == "validation" and sample_id in validation_ids)
+
+
 def _load_index(
     config: ProductTrainingConfig, frozen: FrozenValidation | None, progress: Progress,
 ) -> tuple[Cohort, str, int]:
@@ -196,7 +200,7 @@ def _load_index(
                 or dict(record["groups"]).get("revision_group", "") != row["group_id"]):
             raise ValueError("Published manifest and audited cohort assignments differ.")
         sources.append([paths, _record_hashes(record)])
-        if record["split"] == "train" or (record["split"] == "validation" and record["sample_id"] in selected):
+        if _in_training_scope(record["split"], record["sample_id"], selected):
             scoped.append((index, record, paths))
             if record["detection_candidate"] and not record["quarantined"]:
                 used.add(index)

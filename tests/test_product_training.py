@@ -32,7 +32,7 @@ def _noop(*_: object) -> None:
 
 
 @pytest.fixture
-def profile(tmp_path: Path) -> ProductTrainingConfig:
+def profile(tmp_path: Path, request: pytest.FixtureRequest) -> ProductTrainingConfig:
     source = tmp_path / "source"
     bundle = tmp_path / "bundle"
     bundle.mkdir()
@@ -43,6 +43,9 @@ def profile(tmp_path: Path) -> ProductTrainingConfig:
         row["original_split"] = row["split"]
         row["group_id"] = f"group-{index}"
     rows[-1]["split"] = "test"
+    if getattr(request, "param", False):
+        extra = _sample(source, 6, source="D", split="validation", normal=True)
+        rows.append({**extra, "original_split": "validation", "group_id": "group-5"})
     manifest = bundle / "manifest.csv"
     write_csv(manifest, rows, list(rows[0]))
     revision = {

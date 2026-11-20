@@ -15,7 +15,7 @@ from ict_pipeline.multimodal.audit import Cohort
 from ict_pipeline.multimodal.model_config import FusionConfig, ImageEncoderConfig
 from ict_pipeline.multimodal.preprocessing import PreprocessingState
 from ict_pipeline.multimodal.training_plan import (
-    DetectorInitialization, ProductTrainingConfig, ProductTrainingPlan, _views,
+    DetectorInitialization, ProductTrainingConfig, ProductTrainingPlan, _load_index, _views,
 )
 from ict_pipeline.pipeline.store import digest_json
 
@@ -23,8 +23,8 @@ from test_product_training import profile  # noqa: F401
 
 
 def _run(profile: ProductTrainingConfig, folder: Path, role: analysis.ModelRole, epoch: int) -> Path:
-    cohort = Cohort.load(profile.cohort)
     frozen = read_artifact(profile.validation.cohort, FrozenValidation)
+    cohort, _, _ = _load_index(profile, frozen, lambda *_: None)
     state = PreprocessingState.load(profile.preprocessing)
     architecture = profile.architecture.model_copy(update={
         "image": ImageEncoderConfig.model_validate({"kind": "faster_rcnn_fpn", "detector": {"image_size": 640}}),
@@ -78,6 +78,7 @@ def _run(profile: ProductTrainingConfig, folder: Path, role: analysis.ModelRole,
     return folder
 
 
+@pytest.mark.parametrize("profile", [False, True], indirect=True, ids=["exact", "extra-validation"])
 def test_analysis_cli(tmp_path: Path, profile: ProductTrainingConfig, monkeypatch: pytest.MonkeyPatch) -> None:
     image = _run(profile, tmp_path / "image", "image", 30)
     concat = _run(profile, tmp_path / "concat", "concat", 14)
@@ -99,12 +100,19 @@ def test_analysis_cli(tmp_path: Path, profile: ProductTrainingConfig, monkeypatc
     ])
     audit_path = tmp_path / "leakage.json"
     write_json(audit_path, audit)
+    frozen = read_artifact(profile.validation.cohort, FrozenValidation)
+    candidates = {row.sample_id for row in Cohort.load(profile.cohort).records
+                  if row.split == "validation" and row.detection_candidate}
+    extra_ids = candidates.difference(frozen.identity.sample_ids)
+    assert extra_ids == {row["sample_id"] for row in original[5:]}
+    assert len(candidates) == len(frozen.identity.sample_ids) + len(original[5:])
 
     def scores(
         run: analysis.AnalysisRun, device: str, batch_size: int, donors: dict[str, dict[str, str]],
         progress: analysis.ProgressFactory, checkpoint_dir: Path | None,
     ) -> tuple[dict[str, analysis.Scores], dict[str, str]]:
         assert device == "cpu" and batch_size == 2
+        assert tuple(sorted(row.sample_id for row in run.validation.records)) == frozen.identity.sample_ids
         values = {run.validation[i].sample_id: (0.8, 0.1, 0.1, 0.1, 0.1) for i in range(len(run.validation))}
         return {key: values for key in ("original", *donors)}, (
             {"sensor_removed": "untrained"} if donors else {}
@@ -120,6 +128,7 @@ def test_analysis_cli(tmp_path: Path, profile: ProductTrainingConfig, monkeypatc
     result = cli.invoke(app, args)
     assert result.exit_code == 0, (result.output, result.exception)
     leak = json.loads((out / "leakage.json").read_bytes())["models"]["concat"]
+    assert extra_ids.isdisjoint(leak["validation_ids"])
     assert leak["methods"]["image_similarity"]["validation_ids"] == [original[2]["sample_id"]]
     assert leak["methods"]["capture_group"]["group_count"] == 0
     assert all(original[4]["sample_id"] not in item["validation_ids"] for item in leak["groups"])
@@ -141,6 +150,42 @@ def test_analysis_cli(tmp_path: Path, profile: ProductTrainingConfig, monkeypatc
     failed = cli.invoke(app, [*args, "--out", str(tmp_path / "fresh")])
     assert failed.exit_code == 2 and "fingerprint mismatch" in failed.output
     assert not (tmp_path / "fresh").exists()
+
+
+@pytest.mark.parametrize("failure", ["count", "fingerprint", "validation_ids"])
+def test_analysis_reports_split_mismatch(
+    tmp_path: Path, profile: ProductTrainingConfig, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    path = _run(profile, tmp_path / "image", "image", 30)
+    cohort = Cohort.load(profile.cohort)
+    frozen_path = profile.validation.cohort
+    frozen = read_artifact(frozen_path, FrozenValidation)
+
+    if failure == "validation_ids":
+        def mismatched_views(
+            config: ProductTrainingConfig, scoped: Cohort, state: PreprocessingState, selection: FrozenValidation,
+        ) -> tuple[analysis.MultimodalDataset, analysis.MultimodalDataset, dict[str, object]]:
+            train, validation, counts = _views(config, scoped, state, selection)
+            assert validation is not None
+            validation.records = validation.records[:-1]
+            return train, validation, counts
+
+        monkeypatch.setattr(analysis, "_views", mismatched_views)
+        message = "image: reconstructed Validation sample IDs differ from FrozenValidation"
+    else:
+        metadata = path / "run.json"
+        saved = json.loads(metadata.read_bytes())
+        if failure == "count":
+            saved["samples"]["validation"]["candidates"] += 1
+            split = "validation"
+        else:
+            saved["samples"]["train"]["sample_fingerprint"] = "0" * 64
+            split = "train"
+        metadata.write_text(json.dumps(saved), encoding="utf-8")
+        message = f"image: reconstructed sample counts or sample fingerprints differ from run.json samples for {split}"
+
+    with pytest.raises(ValueError, match=message):
+        analysis._inspect_run("image", path, profile.source, profile.cohort, frozen_path, cohort, frozen)
 
 
 def test_sensor_donors() -> None:
