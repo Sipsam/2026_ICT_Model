@@ -155,7 +155,16 @@ class AIHubProvider:
                         raise DataError("AI Hub returned an invalid redirect.") from None
                     if header.removeprefix(b"apikey: ").strip().decode("ascii") in unquote(url):
                         raise DataError("AI Hub returned an unsafe redirect.")
-                    if origin.scheme != "https" or origin.netloc != "api.aihub.or.kr":
+                    if not (
+                        origin.scheme == "https"
+                        and (
+                            origin.netloc == "api.aihub.or.kr"
+                            or (
+                                origin.netloc == "stream.aihub.or.kr"
+                                and origin.path == "/shellStream.do"
+                            )
+                        )
+                    ):
                         raise DataError("AI Hub redirected outside its HTTPS API origin.")
                     continue
                 if status in {401, 403}:

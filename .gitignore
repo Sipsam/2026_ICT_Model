@@ -29,6 +29,7 @@ outputs/
 *.ckpt
 *.onnx
 *.engine
+configs/
 
 # Experiment tracking
 mlruns/
