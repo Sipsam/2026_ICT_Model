@@ -332,7 +332,15 @@ def plan_training(
         raise ValueError("The frozen Train state contains no observed measurements.")
     train, validation, counts = _views(config, cohort, state, frozen)
 
-    group_receipt = None
+    from ..data.detector_finalization import RECEIPT, verify_finalized_detector
+
+    group_receipt = finalized_detector = None
+    finalized_path = initialization.path.parent / RECEIPT if initialization else None
+    has_finalization = finalized_path is not None and (finalized_path.exists() or finalized_path.is_symlink())
+    if initialization is not None and config.group_verification is None:
+        run_path = initialization.path.parent / "run.json"
+        if has_finalization or (run_path.is_file() and json.loads(run_path.read_bytes()).get("status") == "failed"):
+            raise ValueError("Failed or finalized group Detector initialization requires verified group provenance.")
     if config.group_verification is not None:
         from ..data.group_retraining import read_verification_receipt
         from ..models.weights import LAYOUTS
@@ -345,22 +353,30 @@ def plan_training(
             or result["preprocessing_fingerprint"] != state.fingerprint
         ):
             raise ValueError("Group FPN inputs differ from the passing verification receipt.")
-        run = json.loads((initialization.path.parent / "run.json").read_bytes())
         detector_config = config.architecture.image.detector
-        revision = run.get("dataset_revision") or {}
-        checkpoints = run.get("checkpoints") or {}
-        if (
-            run.get("status") != "completed" or run.get("model") != "faster_rcnn"
-            or run.get("architecture") != LAYOUTS["faster_rcnn"].architecture
-            or revision.get("group_split_revision") != config.revision_id
-            or revision.get("group_verification") != group_receipt
-            or revision.get("detector_scope") != result["detector_scope"]
-            or run.get("initialization_mode") != detector_config.layout
-            or (run.get("configuration") or {}).get("image_size") != detector_config.image_size
-            or checkpoints.get("best") != {"path": initialization.path.name,
-                                           "fingerprint": fingerprint_path(initialization.path)}
-        ):
-            raise ValueError("Use the completed best checkpoint from the verified group Detector and match its layout.")
+        run_path = initialization.path.parent / "run.json"
+        if has_finalization:
+            if run_path.exists() or run_path.is_symlink():
+                raise ValueError("Use a separate finalized Detector directory.")
+            finalized_detector = verify_finalized_detector(
+                initialization.path, initialization.sha256, detector_config, result, group_receipt, config.bundle,
+            )
+        else:
+            run = json.loads(run_path.read_bytes())
+            revision = run.get("dataset_revision") or {}
+            checkpoints = run.get("checkpoints") or {}
+            if (
+                run.get("status") != "completed" or run.get("model") != "faster_rcnn"
+                or run.get("architecture") != LAYOUTS["faster_rcnn"].architecture
+                or revision.get("group_split_revision") != config.revision_id
+                or revision.get("group_verification") != group_receipt
+                or revision.get("detector_scope") != result["detector_scope"]
+                or run.get("initialization_mode") != detector_config.layout
+                or (run.get("configuration") or {}).get("image_size") != detector_config.image_size
+                or checkpoints.get("best") != {"path": initialization.path.name,
+                                               "fingerprint": fingerprint_path(initialization.path)}
+            ):
+                raise ValueError("Use the completed best checkpoint from the verified group Detector or a finalized Detector artifact.")
 
     architecture = config.architecture
     image_contract: dict[str, object] = {}
@@ -383,6 +399,8 @@ def plan_training(
         # images serially, and a frozen backbone retains no activation graph.
         fpn_activations = padded_side**2 * (256 if architecture.image.freeze_backbone else 1024 * config.batch_size)
         provenance = {"format": FORMAT, "architecture": ARCHITECTURE, "sha256": initialization.sha256}
+        if finalized_detector is not None:
+            provenance["finalization_fingerprint"] = finalized_detector
 
     package = Path(__file__).resolve().parents[1]
     code = digest_json({p.relative_to(package).as_posix(): fingerprint_path(p) for p in package.rglob("*.py")})

@@ -43,9 +43,34 @@ ict train --model faster_rcnn --dataset "$BUNDLE/detection" \
   --config-dir "$PROFILES" --runs-dir "$GROUP_RUNS/detector" --approve-train
 ```
 
+## Finalize the best checkpoint after a non-finite Validation loss
+
+On Ubuntu, use the confirmed `BUNDLE`, `INDEX`, and `VERIFY` from the group verification above. The following command is for the run that completed Epoch 46 and selected Epoch 16. Use an unused output directory.
+
+```bash
+REVISION=2553967b4400a43f9f60653c9550f86c48cdb1d983c50c8c506ce48be4f24b55
+GROUP_RUNS="$HOME/ict-results/group-retraining/$REVISION"
+VERIFY="$GROUP_RUNS/verification"
+FAILED="$GROUP_RUNS/detector/1b1792bf7b1445ff88b8272b2bfa743e/faster_rcnn"
+FINALIZED="$GROUP_RUNS/finalized-detector/1b1792bf7b1445ff88b8272b2bfa743e"
+
+ict integrity finalize-detector \
+  --source-run "$FAILED" --bundle "$BUNDLE" \
+  --group-verification "$VERIFY/verification.json" \
+  --cohort "$INDEX/training-cohort.json" \
+  --best-epoch 16 --completed-epoch 46 --out "$FINALIZED" \
+  --validation-device cuda
+```
+
+The command checks the published split, verification receipt, sanitized cohort, scoped Train/Validation COCO bytes, original checkpoint fingerprints, epochs, losses and best model tensors. It publishes a copy of `best.pt` and `finalization.json` together after the checks pass. The receipt records `finalized_early`, the failed run identity and error, and both checkpoint fingerprints and raw SHA-256 hashes. The source run stays failed and its files stay read-only.
+
+The optional `--validation-device` stage checks finite Detector outputs before confidence filtering and measures bbox mAP on the full group COCO Validation split. It uses fp32 and the original Detector image size. Use `cpu` or `rocm` where supported, or omit the option to record inference as `not_run`. Any requested inference failure prevents publication. Finalization uses only Train and Validation Detector payloads and the existing group metadata.
+
 ## Bind the two FPN profiles
 
-After Detector completion, record the full path printed for the completed run's `best.pt` and calculate `sha256sum "$BEST"`. Keep the run's `run.json` beside it. Copy both YAML templates to the group experiment's configuration directory. Fill in the confirmed source, bundle, index and receipt paths and the fingerprints from `verification.json`. Use the **same** `best.pt` and SHA-256 in both profiles. Match `architecture.image.detector.layout` to `initialization_mode` and `image_size` to `configuration.image_size` in the completed Detector's `run.json`. The existing FPN loader checks the SHA-256, architecture and tensor layout on CPU. The group provenance check additionally validates the completed best checkpoint record, split revision and verification receipt.
+For a completed run, keep its `run.json` beside `best.pt` and use `initialization_mode` and `configuration.image_size` from that record. For a finalized run, use `$FINALIZED/best.pt` and keep `finalization.json` beside it. Use `detector_layout` and `image_size` from `finalization.json` and verify the recorded SHA-256 with `sha256sum "$FINALIZED/best.pt"`.
+
+Copy both YAML templates to the group experiment's configuration directory. Fill in the confirmed source, bundle, index and receipt paths and the fingerprints from `verification.json`. Set `detector_initialization.path` and `detector_initialization.sha256` to the **same** checkpoint and raw SHA-256 in both profiles. Set the layout and image size under `architecture.image.detector`. FPN preflight checks the checkpoint and group provenance and records the finalization receipt fingerprint when used.
 
 ```bash
 export CUBLAS_WORKSPACE_CONFIG=:4096:8

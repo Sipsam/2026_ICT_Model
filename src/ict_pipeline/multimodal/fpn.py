@@ -29,6 +29,10 @@ def load_detector(path: Path, sha256: str, config: FPNDetectorConfig) -> nn.Modu
         payload = torch.load(BytesIO(content), weights_only=True, map_location="cpu")
     except (UnpicklingError, RuntimeError, EOFError, ValueError):
         raise ValueError("Cannot read the tensor-only FPN initialization checkpoint.") from None
+    return detector_from_checkpoint(payload, config)
+
+
+def detector_from_checkpoint(payload: object, config: FPNDetectorConfig) -> nn.Module:
     if (not isinstance(payload, dict) or payload.keys() != {
         "format", "architecture", "epoch", "best_epoch", "best_loss", "val_loss", "model", "optimizer", "scaler",
     } or payload["format"] != FORMAT or payload["architecture"] != ARCHITECTURE):
@@ -44,6 +48,6 @@ def load_detector(path: Path, sha256: str, config: FPNDetectorConfig) -> nn.Modu
         or not torch.isfinite(value).all().item()
         for name, value in state.items()
     ):
-        raise ValueError("FPN initialization tensors do not match the configured detector layout.")
+        raise ValueError("FPN initialization tensors must be finite and match the configured detector layout.")
     detector.load_state_dict(state, strict=True)
     return detector

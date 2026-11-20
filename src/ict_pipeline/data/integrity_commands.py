@@ -7,7 +7,7 @@ from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, cast
 
 import typer
 
@@ -15,7 +15,7 @@ from ..config.settings import Credentials, SetupError
 from ..config.storage import SetupFiles
 from ..pipeline.store import digest_json
 from ..pipeline.model import PipelineError
-from ..models.contracts import TrainingError
+from ..models.contracts import Progress, TrainingError
 from .preprocessing.common import write_json
 from .preprocessing.console import console_progress, fresh_output
 from .preprocessing.leakage import AnalysisConfig, analyze_leakage
@@ -39,7 +39,7 @@ def _command(*paths: Path | None) -> Iterator[Credentials]:
     except KeyboardInterrupt:
         raise typer.Exit(130) from None
     except ImportError:
-        typer.echo("Leakage analysis requires the installed preprocessing extra (Pillow and openpyxl).", err=True)
+        typer.echo("Required dependencies are missing. Check the extra for this integrity command.", err=True)
         raise typer.Exit(2) from None
     except (KeyError, TypeError, IndexError):
         typer.echo("Invalid manifest, source metadata, or leakage report schema.", err=True)
@@ -94,6 +94,48 @@ def verify_group(
         typer.echo(json.dumps(payload, indent=2))
         if not result["passed"]:
             raise typer.Exit(1)
+
+
+@integrity_app.command()
+def finalize_detector(
+    source_run: Annotated[Path, typer.Option(help="Original failed Faster R-CNN run directory.")],
+    bundle: Annotated[Path, typer.Option(help="Published group-aware split bundle.")],
+    group_verification: Annotated[Path, typer.Option(help="Passing group verification.json.")],
+    cohort: Annotated[Path, typer.Option(help="Sanitized group training-cohort.json.")],
+    out: Annotated[Path, typer.Option(help="Fresh directory for the finalized best checkpoint and receipt.")],
+    best_epoch: Annotated[int, typer.Option(min=1, help="Expected selected epoch.")],
+    completed_epoch: Annotated[int, typer.Option(min=1, help="Expected last fully completed epoch.")],
+    validation_device: Annotated[str | None, typer.Option(
+        help="Run the optional Validation-only mAP and inference check on cpu, cuda, or rocm.",
+    )] = None,
+) -> None:
+    """Finalize a failed group Detector's best checkpoint for FPN initialization."""
+    from .detector_finalization import Device, finalize_detector as publish
+
+    source_run, bundle, group_verification, cohort, out = (
+        path.expanduser().absolute() for path in (source_run, bundle, group_verification, cohort, out)
+    )
+    with _command(source_run, bundle, group_verification, cohort, out) as credentials:
+        if validation_device not in (None, "cpu", "cuda", "rocm"):
+            raise ValueError("Choose cpu, cuda, or rocm for Validation evaluation.")
+        receipt = publish(source_run, bundle, group_verification, cohort, out, best_epoch=best_epoch,
+                          completed_epoch=completed_epoch, validation_device=cast(Device | None, validation_device),
+                          credentials=credentials, progress=_finalization_progress())
+        typer.echo(str(receipt))
+
+
+def _finalization_progress() -> Progress:
+    active = ""
+    report = console_progress(active, file=sys.stderr)
+
+    def update(stage: str, done: int, total: int) -> None:
+        nonlocal active, report
+        if stage != active:
+            active = stage
+            report = console_progress(stage, file=sys.stderr)
+        report(done, total)
+
+    return update
 
 
 @integrity_app.command()

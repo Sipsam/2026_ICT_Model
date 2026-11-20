@@ -23,7 +23,7 @@ from .contracts import (
 class TorchPredictor:
     def __init__(
         self, name: ModelName, checkpoint: Path, training: TrainConfig, config: EvaluationConfig,
-        scratch: Path,
+        scratch: Path, *, require_finite: bool = False,
     ) -> None:
         import torch
 
@@ -34,6 +34,7 @@ class TorchPredictor:
         }), backend)
         self.name = name
         self.config = config
+        self.require_finite = require_finite
         self.torch = torch
         resources, graphics = probe_hardware(probe_host(), scratch)
         accelerator = None
@@ -148,6 +149,8 @@ class TorchPredictor:
                 scores, indices = result.logits[0].float().sigmoid().flatten().topk(result.logits.shape[1])
                 labels = indices % len(CLASSES)
                 boxes = result.pred_boxes[0][indices // len(CLASSES)]
+            if self.require_finite and any(not value.isfinite().all().item() for value in (boxes, labels, scores)):
+                raise EvaluationError("Detector returned non-finite predictions before score filtering.")
             keep = scores >= self.config.score_floor
             rows = boxes[keep].float().cpu().tolist()
             class_ids = labels[keep].cpu().tolist()
@@ -184,11 +187,12 @@ class TorchPredictor:
 
 def load_predictor(
     name: ModelName, checkpoint: Path, training: TrainConfig, config: EvaluationConfig, scratch: Path,
+    *, require_finite: bool = False,
 ) -> TorchPredictor:
     try:
         # Backends can print checkpoint paths and arbitrary configuration during load.
         with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-            return TorchPredictor(name, checkpoint, training, config, scratch)
+            return TorchPredictor(name, checkpoint, training, config, scratch, require_finite=require_finite)
     except (TrainingError, EvaluationError) as exc:
         raise EvaluationError(str(exc)) from None
     except Exception:
