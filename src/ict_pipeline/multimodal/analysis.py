@@ -321,10 +321,8 @@ def _load_leakage_report(raw: bytes) -> dict[str, Any]:
     return report
 
 
-def project_leakage(
-    audit: dict[str, Any], train: tuple[Record, ...], validation: tuple[Record, ...],
-) -> dict[str, Any]:
-    """Project provider audit groups onto exactly one model's verified data views."""
+def match_leakage_records(audit: dict[str, Any], records: tuple[Record, ...]) -> dict[int, Record]:
+    """Match provider audit indices to cohort records and verify source identity."""
     if audit["schema_version"] != 1 or audit["dataset"] != "aihub-smt-71900":
         raise ValueError("Expected an SMT 71900 leakage.json audit.")
     samples = audit["samples"]
@@ -335,7 +333,7 @@ def project_leakage(
             raise ValueError("Repeated source identity in leakage audit.")
         indexed[key] = index
     membership: dict[int, Record] = {}
-    for record in (*train, *validation):
+    for record in records:
         index = indexed.get((record.provider_split, record.sample_id, record.annotation_path))
         if index is None:
             raise ValueError(f"Leakage audit is missing cohort sample {record.sample_id}.")
@@ -348,7 +346,15 @@ def project_leakage(
             if sample["paths"][field] != path or (sha is not None and sample["hashes"].get(field) != sha):
                 raise ValueError(f"Leakage audit source differs for {record.sample_id} ({field}).")
         membership[index] = record
+    return membership
 
+
+def project_leakage(
+    audit: dict[str, Any], train: tuple[Record, ...], validation: tuple[Record, ...],
+) -> dict[str, Any]:
+    """Project provider audit groups onto exactly one model's verified data views."""
+    samples = audit["samples"]
+    membership = match_leakage_records(audit, (*train, *validation))
     sensor_workbooks: dict[str, list[int]] = defaultdict(list)
     for index in membership:
         if sha := samples[index]["hashes"].get("sensor_path"):
@@ -428,6 +434,10 @@ def score_run(
     from .checkpoint import load_checkpoint
     from .training_torch import _branch_logits
 
+    conditions = {"original": run.profile.branch, **{key: "paired" for key in donors}}
+    total = len(run.validation)
+    report = progress(f"Score {run.role} checkpoint")
+    report(0, total)
     model = load_checkpoint(run.model_path, run.state, expected_config=run.profile.architecture)
     if (model.architecture_fingerprint != run.architecture_fingerprint
             or image_preprocessing_fingerprint(model.config.image, model.image_encoder.input_contract)
@@ -437,7 +447,6 @@ def score_run(
     resolved = resolve_device(torch, TrainConfig(device=device), REGISTRY[ModelName.FASTER_RCNN])
     model.to(resolved).eval()
     skipped = {}
-    conditions = {"original": run.profile.branch, **{key: "paired" for key in donors}}
     if donors:
         if model.branch_status("image") == "trained":
             conditions["sensor_removed"] = "image"
@@ -461,9 +470,6 @@ def score_run(
         ])
         checkpoint_dir = checkpoint_dir / fingerprint
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    report = progress(f"Score {run.role} checkpoint ({len(conditions)} conditions)")
-    total = len(run.validation)
-    report(0, total)
     with torch.inference_mode():
         for start in range(0, total, batch_size):
             end = min(total, start + batch_size)

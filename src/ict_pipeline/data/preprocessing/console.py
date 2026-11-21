@@ -63,18 +63,26 @@ def report_output(
                     copyfileobj(source, destination)
 
 
-def console_progress(stage: str, *, file: TextIO | None = None) -> Progress:
+def console_progress(stage: str, *, file: TextIO | None = None, percent: bool = False) -> Progress:
     started = monotonic()
     last = float("-inf")
+    interactive = percent and file is not None and file.isatty()
+    width = 0
 
     def report(done: int, total: int | None) -> None:
-        nonlocal last
+        nonlocal last, width
         now = monotonic()
-        if done == total or now - last >= 1:
+        interval = 5 if percent and not interactive else 1
+        if done == total or now - last >= interval:
             elapsed = now - started
             eta = f"{elapsed * (total - done) / done:.1f}s" if done and total is not None else "unknown"
-            print(f"{stage} {done}/{total if total is not None else '?'}   elapsed {elapsed:.1f}s   ETA {eta}",
-                  file=file, flush=True)
+            percentage = f" ({done / total:.1%})" if percent and total else ""
+            line = f"{stage} {done}/{total if total is not None else '?'}{percentage}   elapsed {elapsed:.1f}s   ETA {eta}"
+            if interactive:
+                print("\r" + line.ljust(width), end="\n" if done == total else "", file=file, flush=True)
+                width = len(line)
+            else:
+                print(line, file=file, flush=True)
             last = now
 
     return report

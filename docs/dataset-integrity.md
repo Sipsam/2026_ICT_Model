@@ -148,7 +148,7 @@ ict integrity test-release-seal \
   --preprocessing outputs/frozen-sensor/sensor-state.json \
   --image-run runs/image-only \
   --concat-run runs/sensor-concat \
-  --detector-initialization <completed-detector-or-finalized-directory> \
+  --detector-initialization <verified-detector-checkpoint-file> \
   --prior-test-manifest <earlier-reservation-manifest.csv> \
   --approve-seal-verification \
   --out outputs/test-release-seal
@@ -224,6 +224,18 @@ hashes, existing image/sensor similarity evidence, and split assignments. It
 creates an evaluation-time SHA-256 payload snapshot. That snapshot is not a
 historical original-hash index or a reverified payload seal.
 
+The published Group Split manifest stores the AI Hub assignment in
+`original_split` and the current Train/Validation/Test assignment in `split`.
+The evaluation matches source evidence by provider split, sample ID and
+annotation path, then checks it against the current assignments. Shared
+manufacturer, capture day or capture timestamp alone is descriptive metadata.
+Exact duplicates, image and sensor similarity, and explicit production-session
+or capture-group evidence are checked before either model scores Test.
+
+Progress goes to stderr. Each model reports completed samples, total samples
+and percent, including validated batches restored from cache. The final JSON
+is written to stdout.
+
 The fixed checkpoints score the same 1,472 Test records with frozen
 preprocessing and threshold 0.5. No Test-based threshold, preprocessing,
 checkpoint or sample selection is performed. The JSON and CSV exports contain
@@ -243,8 +255,16 @@ device, batch size, seed and checkpoint directory. Resume reuses only
 completed individual inference batch files. Reuse is valid only if the fixed
 plan fingerprint, resolved device/backend, batch size, seed, model
 checkpoints, sample snapshot, cohort and analysis code fingerprint all match.
-Receipt or payload changes invalidate reuse; a completed result is never
-overwritten.
+
+An interrupted `9197e82` run that stopped at the invalid original split error
+can resume with the original arguments plus `--resume` if its running state
+and current inputs match. The integrity checks run again before scoring.
+Batch caches from an older analysis code fingerprint remain on disk under
+their original namespace. This release uses its own namespace.
+If the resume state is missing, unreadable, incompatible, or reports already
+exist, keep the directory and use a new `--out` without `--resume`. If a
+matching cache reports corruption, use a new `--out` without `--resume` and
+choose a fresh `--checkpoint-dir` if one was set explicitly.
 
 Manufacturer and capture-date sharing is reported as subgroup context. It does
 not by itself block the Holdout. Blocking evidence is mapped from the

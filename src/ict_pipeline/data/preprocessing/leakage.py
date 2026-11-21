@@ -303,9 +303,9 @@ def image_pairs(
     if progress:
         progress(0, len(items))
     for index, item in enumerate(items):
-        if progress:
-            progress(index + 1, len(items))
         if item.image is None:
+            if progress:
+                progress(index + 1, len(items))
             continue
         hashes, thumb = item.image
         possible: set[int] = set()
@@ -321,6 +321,8 @@ def image_pairs(
             mae = sum(abs(a - b) for a, b in zip(thumb, other_thumb)) / len(thumb)
             if mae <= config.image_mae:
                 yield other, index, {"hamming_distance": distance, "thumbnail_mae": round(mae, 6)}
+        if progress:
+            progress(index + 1, len(items))
 
 
 def sensor_pairs(
@@ -402,11 +404,15 @@ def pair_groups(method: str, pairs: Iterable[tuple[int, int, dict]], items: list
 def analyze_leakage(
     root: Path, manifest: Path, path_base: Path, config: AnalysisConfig, progress: Progress | None = None,
     *, similarity_progress: Callable[[str], Progress] | None = None, checkpoint: Path | None = None,
+    provider_column: str = "split",
 ) -> dict:
     from importlib.metadata import version
 
     root = root.resolve()
-    rows = source_rows(manifest, root, path_base)
+    rows = normalize_source_rows(read_csv(manifest), root, path_base, provider_column=provider_column)
+    if provider_column != "split":
+        # The analysis report uses the provider split. Published assignments are projected separately.
+        rows = [{**row, "split": row[provider_column]} for row in rows]
     configuration = {**asdict(config), "pillow": version("Pillow"), "sensor_atol": SENSOR_TOLERANCES,
                      "openpyxl": version("openpyxl") if config.verify_xlsx else None}
     manifest_fingerprint = digest_json(rows)

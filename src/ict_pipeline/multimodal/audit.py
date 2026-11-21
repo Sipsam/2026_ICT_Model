@@ -107,13 +107,13 @@ def _ambiguous_files(
     return frozenset(ambiguous)
 
 
-def _isolate(records: list[Record]) -> tuple[Record, ...]:
+def _isolate(records: list[Record], isolation_groups: frozenset[str] = ISOLATION_GROUPS) -> tuple[Record, ...]:
     groups: defaultdict[tuple[str, str], list[int]] = defaultdict(list)
     components = Components(len(records))
     flags: defaultdict[int, set[str]] = defaultdict(set)
     for index, record in enumerate(records):
         for kind, group in record.groups:
-            if kind in ISOLATION_GROUPS:
+            if kind in isolation_groups:
                 groups[kind, group].append(index)
     for (kind, _), members in groups.items():
         assigned = {records[index].split for index in members if records[index].detection_candidate}
@@ -143,6 +143,7 @@ def _isolate(records: list[Record]) -> tuple[Record, ...]:
 def audit_cohort(
     root: Path, manifest: Path, *, path_base: Path | None = None, revision_path: Path | None = None,
     progress: Progress | None = None, checkpoint: Path | None = None,
+    isolate_source_capture: bool = True,
 ) -> Cohort:
     root = root.resolve()
     rows, revision = _read_manifest(root, manifest, (path_base or root).resolve(), revision_path)
@@ -182,7 +183,8 @@ def audit_cohort(
             expected_source = revision.get("selected_source_fingerprint", revision["dataset_fingerprint"])
             if input_fingerprint != expected_source:
                 raise ValueError("Source files changed since the split revision was published.")
-        records = _isolate(records)
+        isolation_groups = ISOLATION_GROUPS if isolate_source_capture else ISOLATION_GROUPS - {"source_capture"}
+        records = _isolate(records, isolation_groups)
         if cache:
             cache.stage("complete")
     return Cohort(

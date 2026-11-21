@@ -271,6 +271,7 @@ def limited_holdout_evaluate(
             approve_test_access=approve_test_access,
             detector_initialization=detector, prior_manifests=prior, resume=resume,
             device=device, batch_size=batch_size, seed=seed, checkpoint_dir=checkpoint_root,
+            progress=lambda stage: console_progress(stage, file=sys.stderr, percent=True),
         )
         typer.echo(json.dumps(credentials.redact(result), indent=2, allow_nan=False))
 
