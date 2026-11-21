@@ -1,5 +1,11 @@
 # Artifact management
 
+Treat the entire local `outputs/final/` tree as a read-only research archive.
+Keep both compressed and extracted artifacts outside Git. Use a different
+destination for generated figures, test outputs and analysis runs. The final
+report cites preserved receipts and publishes aggregate values.
+[Final research report](final-report.md)
+
 ## What filled the Windows temporary drive
 
 The reported audit found about 4.6 GiB free on a 292 GiB C: volume, with about 31.6 GiB in pytest temporary directories and another 9.8 GiB in ICT integration and E2E directories. Individual RT-DETR checkpoints were about 302 MiB. The current audit found no matching historical pytest or ICT directories under the Windows account's `TEMP`. The original inventory is user-reported and the earlier directories could not be attributed to specific tests from their files.

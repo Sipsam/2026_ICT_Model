@@ -7,12 +7,12 @@ inputs below follow the FPN training profiles. Adjust them if the server stored
 the files elsewhere.
 
 ```bash
-cd /home/sipsam/2026_ICT_Model
-results=/home/sipsam/ict-results
+results=/path/to/ict-results
+source_root=data/extracted
 index="$results/smt-aihub-sensor-index-v1"
 
 ict multimodal analyze \
-  --root /home/sipsam/2026_ICT_Model/data/extracted \
+  --root "$source_root" \
   --audit "$results/sensor-integrity-analysis/leakage.json" \
   --cohort "$index/training-cohort.json" \
   --frozen-validation "$index/frozen-validation.json" \

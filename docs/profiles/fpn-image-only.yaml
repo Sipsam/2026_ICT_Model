@@ -6,7 +6,7 @@ cohort: ~/ict-results/smt-aihub-sensor-index-v1/training-cohort.json
 cohort_fingerprint: "<training-cohort-fingerprint>"
 preprocessing: ~/ict-results/smt-aihub-sensor-index-v1/sensor-state.json
 detector_initialization:
-  path: /home/sipsam/ict-results/detectors/4e3d985db23b48dbac634238b64b52b8/faster_rcnn/best.pt
+  path: "<verified-provider-detector-best.pt>"
   sha256: "<detector-sha256>"
 branch: image
 architecture:

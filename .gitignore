@@ -1,51 +1,57 @@
-
-# Python
+# Python, packaging, and test tools
 __pycache__/
 *.py[cod]
-.venv/
+*.egg-info/
+.eggs/
+/build/
+/dist/
+/htmlcov/
+.coverage
+.coverage.*
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-*.egg-info/
 
-# Environment
+# Local development settings and credentials
+/.venv/
+/venv/
 .env
 .env.*
 !.env.example
 /configs/local.yaml
 /configs/local.yaml.tmp-*
+/configs/local/
+*.local.yaml
+*.local.yml
+*.key
+*.pem
+/.vscode/
+/.idea/
+.DS_Store
+Thumbs.db
+.ipynb_checkpoints/
+*.tmp
+*.swp
 
-# Raw and processed datasets
-data/raw/
-data/interim/
-data/processed/
-data/extracted/
+# Dataset payloads and derived datasets
+/data/raw/
+/data/extracted/
+/data/interim/
+/data/processed/
 
-# Model artifacts
-outputs/
+# Protected research archive and generated run/report trees (including batch caches)
+/outputs/*
+/outputs/final/
 /runs/
+/mlruns/
+/wandb/
 *.pt
 *.pth
 *.ckpt
 *.onnx
 *.engine
-configs/
+*.safetensors
 
-# Experiment tracking
-mlruns/
-wandb/
-
-# Jupyter
-.ipynb_checkpoints/
-
-# IDE
-.vscode/
-.idea/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# External Programs
-tools/aihubshell
-PLANS.md
+# External provider utility and local historical planning notes
+/tools/aihubshell
+/PLANS.md

@@ -1,40 +1,79 @@
-# ICT pipeline contributor instructions
+# ICT Pipeline maintenance instructions
 
-These rules apply throughout the repository. The cross-platform Python pipeline covers AI Hub dataset download and extraction, dataset audit, manifest generation, YOLO/COCO conversion and validation, model training and validation, evaluation, and reporting. The dataset is AI Hub SMT manufacturing dataset `71900`, with images, JSON annotations, and XLSX sensor files.
+This repository maintains the AI Hub 71900 PCB SMT detector and multimodal
+classification pipeline. Read the relevant implementation, public command,
+artifact contract, and tests before editing. Record Git status, preserve existing
+edits, and consult local `PLANS.md` when available as historical context.
 
-## Inspect and reuse existing work
+## Follow the existing module boundaries
 
-- Before editing, read `PLANS.md`, check `git status`, and inspect the relevant entry points, helpers, and data contracts. Preserve in-progress edits and keep changes within the requested phase and file scope.
-- Start with the existing implementations. Inspect `scripts/download_data.sh` and `tools/aihubshell` for acquisition, `scripts/migrate_dataset_paths.py` for path mapping, `scripts/validate_dataset.py` for audit, `scripts/build_manifest.py` for manifest generation, `scripts/convert_detection.py` for YOLO/COCO conversion, and `scripts/validate_detection.py` for conversion validation. Check `src/data/validate.py` and the sensor and visualization scripts when their behavior is relevant.
-- Reuse working logic before refactoring. Preserve existing scripts and their entry points, arguments, and artifact contracts. When extracting reusable functions, keep compatibility wrappers and verify behavior on small inputs.
-- Treat the `ict` CLI, packaged pipeline, and later training and evaluation interfaces in `PLANS.md` as roadmap items until their implementations are verified in the working tree.
+- `cli.py` and domain `commands.py` modules parse arguments, load configuration,
+  present progress, and map errors to exit codes. Keep typed execution in the
+  domain modules and platform operations in the existing adapters.
+- `data/preprocessing/` owns audit, Manifest, leakage evidence, group assignments,
+  YOLO/COCO conversion and split publication. `data/` also owns archive handling,
+  group verification, detector finalization and Test Release Gate receipts.
+- `models/` owns the detector registry and backend training. `classification/`
+  contains the earlier classification workflows. `multimodal/` owns verified
+  pairs, Train-fitted preprocessing, encoders, training, checkpoint validation,
+  and Validation analysis. `evaluation/` owns evaluation protocols and metrics.
+- `pipeline/`, `runtime/`, and `reporting/` own stage state, execution adapters,
+  and run metadata. `inspection/`, `api/`, and `streaming/` provide inference
+  interfaces. Preserve the installed `ict` entry point and supported script or
+  Python interfaces. Reuse existing code before moving or generalizing it.
+- Type new and changed Python interfaces. Use `pathlib.Path`, portable relative
+  paths where the artifact contract permits them, and explicit I/O roots. Keep
+  command help and CPU fixture workflows available without optional backends.
 
-## Architecture and portability
+## Preserve scientific records and isolate splits
 
-- Keep CLI handlers focused on argument parsing, configuration, presentation, and exit codes. Put typed stage logic in importable Python modules. Isolate shell commands, external tools, OS and device probing, and container or remote execution in adapters.
-- Use `pathlib.Path` for filesystem paths. Resolve configurable roots explicitly and use portable relative paths in manifests where the existing contract permits. Avoid hard-coded drive letters, mount points, home directories, and shell assumptions. Apply OS-specific path translation at adapter boundaries.
-- Design for Windows, Linux, WSL2, and macOS. Keep CLI help, diagnostics, preprocessing, and fixture tests usable on CPU without importing optional training dependencies. Report unavailable platform or device capabilities explicitly.
+- Treat `data/raw/`, source files in `data/extracted/`, and all of
+  `outputs/final/` as read-only. Never modify an image through a hard link.
+  Write derived files under separately configured roots. Keep final artifacts,
+  source sample IDs, checkpoints, raw data and machine-specific metadata out
+  of commits. Cite public aggregate results and artifact fingerprints.
+- Preserve canonical class order, source and revised split identity,
+  `candidate`/`hold_review`/`exclude`, and normal images with empty target
+  annotations. Pair files with verified names, timestamps and value agreement.
+  Image IDs and sensor IDs may legitimately differ.
+- Keep `defect_detected` and derived or unavailable-at-inference fields out of
+  model inputs. Fit preprocessing, balancing, and feature selection on Train.
+  Freeze Validation membership and thresholds. Compare models on the same
+  samples and metric protocol. Inspect explicit session and capture-group
+  evidence, exact hashes and similarity across splits.
+- Use the existing published revision and verify scoped Train/Validation
+  inputs. Preserve membership, publication and cohort fingerprints, frozen
+  preprocessing, resolved non-secret settings, seed, code/runtime identity,
+  and checkpoint hashes. Load only trusted, pinned checkpoint formats and
+  verify the original run or finalization receipt. Preserve finalized
+  checkpoint bytes, thresholds, metrics and receipts.
+- Keep Test out of development and tuning. The strict Test Release Gate requires
+  its existing preflight and trusted historical seal evidence. Limited Internal
+  Holdout is a separate same-source protocol with explicit Test access approval.
+  Preserve historical reservation and seal status. Never open Test payloads
+  without approval or use Test outcomes to choose checkpoints, thresholds,
+  preprocessing, model settings or membership. Preserve Test access history.
 
-## Protect data and credentials
+## Operate and verify safely
 
-- Treat source archives and images, JSON annotations, and XLSX sensor files as read-only. Preserve `data/raw` and source files under `data/extracted`. Write derived datasets, run state, and reports under configured output roots such as `data/processed`, `runs`, and `outputs`. Never edit an image through a hard link to a source file.
-- Load credentials from environment variables or a local untracked `.env`. Use placeholders in examples. Keep credentials out of Git, command output, logs, errors and tracebacks, artifacts, and reports. Sanitize subprocess diagnostics and saved config or run metadata before emitting or persisting them. Keep secret values out of command-line arguments where the adapter supports a safer channel.
-- Require explicit user approval before starting large downloads, including datasets or pretrained weights, any installs, model training, deletion, or other destructive operations such as overwriting existing artifacts or applying dataset path migrations. This applies to direct calls, subprocesses, retries, and non-interactive runs. Default to safe previews where supported and show scope and destinations before a gated action.
-
-## Make long tasks observable and resumable
-
-- Show the active stage, completed and total work when known, elapsed time, and an ETA when estimable. Use structured logs and actionable errors with the failed stage and relevant non-secret context. Return a failure status when execution fails.
-- Persist stage status and checkpoints so interrupted jobs can resume. Verify output integrity and check input and configuration fingerprints before reusing completed work. Use temporary outputs and finalize them atomically where possible. Keep partial artifacts distinguishable from completed results and handle cancellation and retries without corrupting completed outputs.
-
-## Preserve split and label integrity
-
-- Carry the original Train and Validation assignments through audit, manifest generation, conversion, training, and evaluation. Fit preprocessing, feature selection, and resampling on Train only. Check for cross-split duplicates and shared production groups or sensor sessions when provenance permits. Keep any independent Test split out of training and tuning and identify the split in reported metrics.
-- Never include `defect_detected` or any feature derived from it in model inputs, including sensor-only and multimodal inputs. Use it only as a label where the task defines it as such. Exclude other target-derived data and signals unavailable at inference time.
-- Preserve the five target defect classes and existing class mappings, normal images with empty target annotations, and the manifest decisions `candidate`, `hold_review`, and `exclude`. A `candidate` row is eligible for conversion under the existing policy and may still require ground-truth review. Validate sensor alignment with filenames, timestamps, and values where available. Sensor and image IDs can legitimately differ.
-- Record the data and split fingerprints, class and label policies, seeds, resolved non-secret configuration, code version, runtime, and checkpoints needed to reproduce training and evaluation. Compare models on the same evaluation samples and metrics.
-
-## Test and report actual results
-
-- Add type annotations to new or changed Python interfaces. Write focused `pytest` tests for changed behavior with tiny synthetic fixtures, `tmp_path`, and mocks for network, subprocess, and accelerator calls. Keep default tests CPU-only and independent of real datasets, credentials, and full training. Cover relevant failures and regressions, including split preservation, restricted feature selection, and interrupted-stage recovery when affected.
-- Report checks as **Passed**, **Failed**, or **Not run**. Include executed commands and observed outcomes, and explain skipped checks or unavailable environments. Treat historical dataset baselines in `PLANS.md` as comparison references. Never invent test results, dataset counts, or metrics for the current work.
-- Close each task with changed files, test outcomes, limitations, and next-step interfaces. Name the CLI entry points, Python interfaces, or artifact contracts the next phase can rely on and identify any that remain planned. If a commit is requested, use an English Conventional Commit and record the actual test outcomes.
+- Use environment variables or an ignored `.env` for credentials. Sanitize
+  subprocess output, diagnostics, reports and saved settings. Use placeholders
+  in templates and command examples.
+- Require explicit approval before installs, large downloads, training,
+  deletion, overwrites, or applying data migrations. Preview scope and
+  destinations. Verify exact paths before any authorized cleanup and preserve
+  recoverable state. A research publication task uses stored metrics.
+- Keep long stages observable and resumable. Report progress, elapsed time and
+  ETA when estimable. Check input, configuration and artifact fingerprints,
+  publish atomically where supported, and return failure on errors.
+- Add focused synthetic `pytest` coverage for changed behavior. Preserve existing
+  contracts around filesystem safety, alignment, leakage, checkpoint
+  provenance, deterministic scores, batch recovery and both Test protocols.
+  Default fixture checks use CPU, mocks and `tmp_path`. Treat real-data and
+  experimental training as separate approved activities.
+- Validate the affected commands, compilation, focused tests, full applicable
+  suite, links and scope. Maintain the [documentation index](docs/README.md) and
+  update example commands with interface changes. List actual checks as
+  **Passed**, **Failed**, or **Not run**, with skipped platforms and limitations.
+  Review the complete staged diff for scientific payloads and unintended files.
+  Use English Conventional Commits and record actual test results.

@@ -83,6 +83,7 @@ checkpoint format binds the architecture to the Train-fitted preprocessing
 state. Existing detector predictions can accompany the product result in
 their original coordinates. The optional Faster R-CNN adapter pools an FPN
 level from a caller-supplied detector. YOLO and RT-DETR provide detection
-evidence through their existing evaluation interfaces. Product heads start
-untrained, and their accuracy and calibration remain unverified.
-[Architecture and model interfaces](multimodal-architecture.md)
+evidence through their existing evaluation interfaces. The final FPN
+Image-only and Sensor Concat training, checkpoint selection and same-source
+holdout results are documented in the research report. Calibration remains
+outside that evaluation. [Architecture and model interfaces](multimodal-architecture.md) · [Final research report](final-report.md)
