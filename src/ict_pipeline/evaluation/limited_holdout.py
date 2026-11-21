@@ -5,8 +5,9 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
 
 from ..data.preprocessing.common import read_csv
 from ..data.preprocessing.leakage import AnalysisConfig, analyze_leakage
@@ -14,10 +15,9 @@ from ..data.preprocessing.policy import NAMES
 from ..data.preprocessing.revision import read_publication
 from ..data.test_release_gate import preflight_test_release
 from ..evaluation.product import _metric
-from ..multimodal.analysis import _inspect_run
+from ..multimodal.analysis import _inspect_run, score_run
 from ..multimodal.audit import Cohort, audit_cohort
-from ..multimodal.checkpoint import load_checkpoint
-from ..multimodal.dataset import MultimodalDataset, collate
+from ..multimodal.dataset import MultimodalDataset
 from ..multimodal.preprocessing import PreprocessingState
 from ..pipeline.store import _reject_link, digest_json
 
@@ -206,13 +206,34 @@ def verify_test_payload_integrity(
         root, bundle / "manifest.csv", root, AnalysisConfig(image_hamming=4, image_mae=8.0,
                                                             sensor_scale=1.0, verify_xlsx=True),
     )
+    record_by_original_id = {
+        (record.provider_split, record.sample_id, record.annotation_path): record
+        for record in split_cohort.records
+    }
     cross = []
+    block_methods = {
+        "image_sha256", "sample_id", "image_similarity",
+        "production_session", "capture_group", "sensor_exact", "sensor_similarity",
+    }
     for group in audit["groups"]:
-        splits = set(group["by_original_split"])
+        if group["method"] not in block_methods:
+            continue
+        members = []
+        for index in group["members"]:
+            sample = audit["samples"][index]
+            record = record_by_original_id.get((
+                sample["original_split"], sample["sample_id"], sample["paths"]["annotation_path"],
+            ))
+            if record is not None:
+                members.append(record)
+        splits = {record.split for record in members}
         if "test" in splits and any(split in ("train", "validation") for split in splits):
             cross.append({
                 "group_id": group["group_id"], "method": group["method"],
                 "splits": sorted(splits),
+                "test_ids": sorted(record.sample_id for record in members if record.split == "test"),
+                "development_ids": sorted(record.sample_id for record in members
+                                           if record.split in ("train", "validation")),
             })
     if cross:
         raise ValueError("Test-to-development similarity or leakage evidence detected: " + json.dumps(cross[:20]))
@@ -221,7 +242,51 @@ def verify_test_payload_integrity(
     coco_ids = sorted(str(image["file_name"]).rsplit(".", 1)[0] for image in coco["images"])
     if coco_ids != sorted(test_ids):
         raise ValueError("COCO Test sample set differs from the fixed manifest.")
-    return {"file_hash_duplicates": [], "cross_split_similarity": [], "coco_test_sample_count": len(coco_ids)}
+    coco_images = {str(image["file_name"]).rsplit(".", 1)[0]: image for image in coco["images"]}
+    coco_categories: dict[str, set[int]] = {sample_id: set() for sample_id in coco_ids}
+    coco_boxes: dict[str, list[tuple[int, tuple[float, float, float, float]]]] = {
+        sample_id: [] for sample_id in coco_ids
+    }
+    coco_annotation_count = 0
+    for annotation in coco["annotations"]:
+        image_id = annotation["image_id"]
+        image = next((row for row in coco["images"] if row["id"] == image_id), None)
+        if image is None:
+            raise ValueError("COCO Test annotation references a missing image.")
+        sample_id = str(image["file_name"]).rsplit(".", 1)[0]
+        if sample_id not in coco_categories:
+            continue
+        coco_annotation_count += 1
+        category_id = annotation["category_id"]
+        if type(category_id) is not int or category_id not in range(1, len(NAMES) + 1):
+            raise ValueError("COCO Test annotation has an invalid canonical class ID.")
+        coco_categories[sample_id].add(category_id)
+        box = annotation.get("bbox")
+        if not isinstance(box, list) or len(box) != 4:
+            raise ValueError("COCO Test annotation has a malformed bbox.")
+        try:
+            coco_boxes[sample_id].append((category_id, tuple(float(value) for value in box)))
+        except (TypeError, ValueError):
+            raise ValueError("COCO Test annotation bbox values must be numeric.") from None
+    for record in test_records:
+        original_categories = {target.category for target in record.targets or ()}
+        if coco_categories[record.sample_id] != original_categories:
+            raise ValueError(f"COCO/original Test label mismatch for {record.sample_id}.")
+        original_boxes = [(target.category, target.box) for target in record.targets or ()]
+        if sorted(coco_boxes[record.sample_id]) != sorted(original_boxes):
+            raise ValueError(f"COCO/original Test box mismatch for {record.sample_id}.")
+        if not record.image_available or record.image_size is None or record.sequence is None:
+            raise ValueError(f"Test modality or sensor alignment missing for {record.sample_id}.")
+        if record.alignment != "matched" or record.sensor_sha256 is None:
+            raise ValueError(f"Test sensor is not explicitly aligned for {record.sample_id}.")
+    if len(coco_categories) != 1472:
+        raise ValueError("COCO Test image count differs from the fixed Holdout cohort.")
+    return {
+        "file_hash_duplicates": duplicate,
+        "cross_split_similarity": cross,
+        "coco_test_sample_count": len(coco_ids),
+        "coco_annotation_count": coco_annotation_count,
+    }
 
 
 def _subset_metrics(frozen_ids: list[str], scores: dict[str, tuple[float, ...]],
@@ -241,14 +306,14 @@ def _subset_metrics(frozen_ids: list[str], scores: dict[str, tuple[float, ...]],
         all_fn += fn
         positive = tp + fn
         negative = tn + fp
-        fpr = fp / negative if negative else 0.0
+        fpr = fp / negative if negative else None
         per_class.append({
             "name": metric.name, "auroc": metric.auroc, "precision": metric.precision,
             "recall": metric.recall, "f1": metric.f1, "tp": tp, "fp": fp, "fn": fn, "tn": tn,
             "positive": positive, "negative": negative, "fpr": fpr,
         })
-        if positive:
-            positive_supported_f1.append(metric.f1 or 0.0)
+        if positive and metric.f1 is not None:
+            positive_supported_f1.append(metric.f1)
     defined_f1 = [row["f1"] for row in per_class if row["f1"] is not None]
     defined_auroc = [row["auroc"] for row in per_class if row["auroc"] is not None]
     return {
@@ -258,7 +323,10 @@ def _subset_metrics(frozen_ids: list[str], scores: dict[str, tuple[float, ...]],
         "positive_supported_macro_f1": (
             sum(positive_supported_f1) / len(positive_supported_f1) if positive_supported_f1 else None
         ),
-        "micro_f1": 2 * all_tp / (2 * all_tp + all_fp + all_fn) if (2 * all_tp + all_fp + all_fn) else 0.0,
+        "micro_f1": (
+            2 * all_tp / (2 * all_tp + all_fp + all_fn)
+            if (2 * all_tp + all_fp + all_fn) else None
+        ),
         "classes": per_class,
     }
 
@@ -270,6 +338,10 @@ def evaluate_limited_holdout(
     image_run: Path, concat_run: Path, out: Path, approve_test_access: bool,
     detector_initialization: Path | None = None, prior_manifests: tuple[Path, ...] = (),
     resume: bool = False,
+    device: Literal["cpu", "cuda", "rocm"] = "cpu",
+    batch_size: int = 32,
+    seed: int = 42,
+    checkpoint_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Approve, verify, score both fixed FPN checkpoints, and export JSON/CSV summaries."""
     root = root.resolve()
@@ -285,10 +357,22 @@ def evaluate_limited_holdout(
         detector_initialization=detector_initialization, prior_manifests=prior_manifests,
     )
     snapshot = snapshot_test_payload(root, bundle, revision_id, live["test_sample_ids"])
+    if batch_size < 1:
+        raise ValueError("Use a positive Holdout inference batch size.")
+    if seed < 0:
+        raise ValueError("Use a nonnegative Holdout seed.")
+    if device not in ("cpu", "cuda", "rocm"):
+        raise ValueError("Use cpu, cuda, or rocm for Holdout evaluation.")
+    if checkpoint_dir is not None:
+        checkpoint_dir = checkpoint_dir.expanduser().resolve()
     plan_fingerprint = digest_json({
         "preflight_fingerprint": preflight_payload["fingerprint"],
         "live_evaluation_plan": live["evaluation_plan"],
         "test_snapshot_fingerprint": snapshot["fingerprint"],
+        "device": device,
+        "batch_size": batch_size,
+        "seed": seed,
+        "checkpoint_dir": str(checkpoint_dir) if checkpoint_dir is not None else "output-default",
     })
 
     if resume:
@@ -309,6 +393,7 @@ def evaluate_limited_holdout(
         "schema_version": 1, "status": "running", "plan_fingerprint": plan_fingerprint,
         "preflight_fingerprint": preflight_payload["fingerprint"],
         "test_snapshot_fingerprint": snapshot["fingerprint"],
+        "device": device, "batch_size": batch_size, "seed": seed,
     }, indent=2), encoding="utf-8")
 
     training_cohort = Cohort.load(cohort)
@@ -323,9 +408,6 @@ def evaluate_limited_holdout(
 
     from ..evaluation.product_protocol import FrozenValidation
     from ..evaluation.product import read_artifact
-    from ..models.registry import REGISTRY, resolve_device
-    from ..models.contracts import ModelName, TrainConfig
-    from ..multimodal.training_torch import _branch_logits
     from ..multimodal.analysis import GroupAnalysisInputs
 
     frozen_validation_data = read_artifact(frozen_validation, FrozenValidation)
@@ -368,23 +450,27 @@ def evaluate_limited_holdout(
 
     ids = tuple(sorted(test_records))
     scores: dict[str, dict[str, tuple[float, ...]]] = {"image_only": {}, "sensor_concat": {}}
+    batch_checkpoint_root = checkpoint_dir if checkpoint_dir is not None else out / "batch-checkpoints"
+    batch_checkpoint_root.mkdir(parents=True, exist_ok=True)
+
+    def progress(message: str):
+        def report(completed: int, total: int) -> None:
+            return None
+        return report
+
     for role, run in (("image_only", image_inspected), ("sensor_concat", concat_inspected)):
-        branch = "image" if role == "image_only" else "paired"
         mode = "image" if role == "image_only" else "paired"
         dataset = MultimodalDataset(
             split_cohort, root, "test", mode=mode, preprocessing=None if mode == "image" else state,
             missing="error", sample_ids=frozenset(ids),
         )
-        model = load_checkpoint(run.model_path, run.state, expected_config=run.profile.architecture)
-        resolved = resolve_device(torch, TrainConfig(device="cpu"), REGISTRY[ModelName.FASTER_RCNN])
-        model.to(resolved).eval()
-        for start in range(0, len(dataset), 32):
-            samples = [dataset[index] for index in range(start, min(start + 32, len(dataset)))]
-            batch = collate(samples)
-            output = model(batch)
-            logits = _branch_logits(output, branch, len(samples))
-            for sample_id, vector in zip(output.sample_ids, logits.sigmoid().tolist(), strict=True):
-                scores[role][sample_id] = tuple(float(value) for value in vector)
+        test_run = replace(run, validation=dataset)
+        condition_scores, skipped = score_run(
+            test_run, device, batch_size, {}, progress, batch_checkpoint_root, seed,
+        )
+        if skipped:
+            raise ValueError(f"{role}: unexpected skipped Holdout branch: {skipped}")
+        scores[role] = condition_scores["original"]
         if set(scores[role]) != set(ids):
             raise ValueError(f"{role}: model did not score the complete fixed Test cohort.")
 
@@ -422,6 +508,19 @@ def evaluate_limited_holdout(
             if concat_overall["macro_f1"] is not None and image_overall["macro_f1"] is not None else None
         ),
     }
+    final_payload_snapshot = snapshot_test_payload(root, bundle, revision_id, live["test_sample_ids"])
+    if final_payload_snapshot["fingerprint"] != snapshot["fingerprint"]:
+        raise ValueError("Test payload or evaluation snapshot changed during Limited Holdout scoring.")
+    final_preflight, final_live = revalidate_limited_holdout(
+        root=root, bundle=bundle, revision_id=revision_id, preflight=preflight,
+        group_verification=group_verification, cohort=cohort,
+        frozen_validation=frozen_validation, preprocessing=preprocessing,
+        image_run=image_run, concat_run=concat_run,
+        detector_initialization=detector_initialization, prior_manifests=prior_manifests,
+    )
+    if final_preflight["fingerprint"] != preflight_payload["fingerprint"] or final_live != live:
+        raise ValueError("Preflight, checkpoint or receipt changed before Holdout completion.")
+
     result = {
         "schema_version": 1,
         "stage": "limited_internal_holdout_evaluation",
@@ -447,6 +546,11 @@ def evaluate_limited_holdout(
             "class_order": list(NAMES),
             "detector_initialization": live["evaluation_plan"]["detector_initialization"],
             "sensor_preprocessing": "frozen_train_only",
+            "device": device,
+            "batch_size": batch_size,
+            "seed": seed,
+            "batch_checkpoint_dir": str(batch_checkpoint_root),
+            "resume_scope": "completed inference batches only under matching checkpoint, dataset, device, batch-size and seed fingerprint",
         },
         "models": model_results,
         "comparison": comparison,
@@ -482,5 +586,7 @@ def evaluate_limited_holdout(
         "preflight_fingerprint": preflight_payload["fingerprint"],
         "test_snapshot_fingerprint": snapshot["fingerprint"],
         "result_fingerprint": result["fingerprint"],
+        "device": device, "batch_size": batch_size, "seed": seed,
+        "batch_checkpoint_dir": str(batch_checkpoint_root),
     }, indent=2), encoding="utf-8")
     return result

@@ -421,6 +421,7 @@ def sensor_donors(
 def score_run(
     run: AnalysisRun, device: str, batch_size: int, donors: dict[str, dict[str, str]],
     progress: ProgressFactory, checkpoint_dir: Path | None = None,
+    seed: int = 42,
 ) -> tuple[dict[str, Scores], dict[str, str]]:
     import torch
 
@@ -449,7 +450,15 @@ def score_run(
     scores: dict[str, Scores] = {condition: {} for condition in conditions}
     if checkpoint_dir is not None:
         accelerator = torch.cuda.get_device_name(resolved) if resolved.startswith("cuda") else resolved
-        fingerprint = digest_json([run.provenance, _environment(), resolved, accelerator, batch_size, donors, conditions])
+        dataset_identity = [
+            (row.split, row.provider_split, row.sample_id, row.image_sha256,
+             row.annotation_sha256, row.sensor_sha256)
+            for row in run.validation.records
+        ]
+        fingerprint = digest_json([
+            run.provenance, _environment(), resolved, accelerator, batch_size, seed,
+            donors, conditions, dataset_identity,
+        ])
         checkpoint_dir = checkpoint_dir / fingerprint
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
     report = progress(f"Score {run.role} checkpoint ({len(conditions)} conditions)")
@@ -460,6 +469,7 @@ def score_run(
             end = min(total, start + batch_size)
             samples = [run.validation[index] for index in range(start, end)]
             ids = tuple(sample.sample_id for sample in samples)
+            expected_split = samples[0].split
             batch_path = checkpoint_dir / f"{start:08d}.json" if checkpoint_dir is not None else None
             if batch_path is not None and batch_path.exists():
                 cached = _read_batch(batch_path, ids, set(conditions))
@@ -475,8 +485,8 @@ def score_run(
                 elif condition in donors:
                     variant = [replace(sample, sensor=windows[donors[condition][sample.sample_id]]) for sample in samples]
                 output = model(collate(variant))
-                if output.sample_ids != ids or output.split != "validation":
-                    raise ValueError("Scoring must preserve batch sample IDs and the Validation split.")
+                if output.sample_ids != ids or output.split != expected_split:
+                    raise ValueError("Scoring must preserve batch sample IDs and the fixed dataset split.")
                 batch_scores[condition] = dict(zip(output.sample_ids, map(tuple, _branch_logits(
                     output, branch, len(samples),
                 ).sigmoid().tolist()), strict=True))

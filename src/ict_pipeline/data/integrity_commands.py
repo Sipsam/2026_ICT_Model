@@ -7,7 +7,7 @@ from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Annotated, cast
+from typing import Annotated, Literal, cast
 
 import typer
 
@@ -234,6 +234,14 @@ def limited_holdout_evaluate(
         "--resume",
         help="Resume only when the fixed plan and payload snapshot match.",
     )] = False,
+    device: Annotated[Literal["cpu", "cuda", "rocm"], typer.Option(
+        help="Evaluation device: cpu, cuda, or rocm.",
+    )] = "cpu",
+    batch_size: Annotated[int, typer.Option(min=1, help="Inference batch size.")] = 32,
+    seed: Annotated[int, typer.Option(min=0, help="Deterministic Holdout scoring seed.")] = 42,
+    checkpoint_dir: Annotated[Path | None, typer.Option(
+        help="Optional batch inference checkpoint directory for resumable scoring.",
+    )] = None,
 ) -> None:
     """Run a limited internal holdout evaluation without changing the strict Test Release Gate."""
     from ..evaluation.limited_holdout import evaluate_limited_holdout
@@ -246,6 +254,9 @@ def limited_holdout_evaluate(
     )
     detector = detector_initialization.expanduser().resolve() if detector_initialization is not None else None
     prior = tuple(path.expanduser().resolve() for path in (prior_test_manifest or ()))
+    checkpoint_root = checkpoint_dir.expanduser().resolve() if checkpoint_dir is not None else None
+    if checkpoint_root is not None and any(checkpoint_root.is_relative_to(path) for path in (bundle, out)):
+        raise ValueError("Choose a scoring checkpoint directory outside the split bundle and Holdout output.")
     with _command(root, bundle, preflight, group_verification, cohort, frozen, preprocessing,
                   image_run, concat_run, out, detector, *prior) as credentials:
         if not approve_test_access:
@@ -259,6 +270,7 @@ def limited_holdout_evaluate(
             image_run=image_run, concat_run=concat_run, out=out,
             approve_test_access=approve_test_access,
             detector_initialization=detector, prior_manifests=prior, resume=resume,
+            device=device, batch_size=batch_size, seed=seed, checkpoint_dir=checkpoint_root,
         )
         typer.echo(json.dumps(credentials.redact(result), indent=2, allow_nan=False))
 

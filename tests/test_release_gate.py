@@ -212,3 +212,15 @@ def test_limited_holdout_subgroup_metrics_and_limitations() -> None:
         "external_independence_verified": False,
         "production_session_independence_verified": False,
     }
+
+
+def test_limited_holdout_cli_exposes_device_batch_seed_and_checkpoint(tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+    from ict_pipeline.cli import app
+
+    result = CliRunner().invoke(app, ["integrity", "limited-holdout-evaluate", "--help"])
+    assert result.exit_code == 0
+    assert "--device" in result.output
+    assert "--batch-size" in result.output
+    assert "--seed" in result.output
+    assert "--checkpoint-dir" in result.output

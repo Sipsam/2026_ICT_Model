@@ -207,8 +207,16 @@ ict integrity limited-holdout-evaluate \
   --detector-initialization <completed-detector-or-finalized-directory> \
   --prior-test-manifest <earlier-reservation-manifest.csv> \
   --approve-test-access \
+  --device cpu \
+  --batch-size 32 \
+  --seed 42 \
+  --checkpoint-dir runs/limited-holdout-batches \
   --out outputs/limited-internal-holdout
 ```
+
+For Ubuntu CUDA evaluation, set `--device cuda --batch-size <n> --seed 42`.
+ROCm uses `--device rocm` on a compatible ROCm PyTorch build. CPU remains
+available for Windows fixture and diagnostic runs.
 
 After approval, the command validates image, annotation and XLSX structure,
 the fixed sample and COCO label correspondence, Train/Validation/Test file
@@ -230,6 +238,19 @@ Every result explicitly records `evaluation_origin=internal_same_source`,
 `external_independence_verified=false`, and
 `production_session_independence_verified=false`.
 
-To resume an interrupted run, pass `--resume` with the same output directory.
-Resume is permitted only when the fixed plan fingerprint and evaluation-time
-payload snapshot match. A completed result is never overwritten.
+To resume an interrupted run, pass `--resume` with the same output directory,
+device, batch size, seed and checkpoint directory. Resume reuses only
+completed individual inference batch files. Reuse is valid only if the fixed
+plan fingerprint, resolved device/backend, batch size, seed, model
+checkpoints, sample snapshot, cohort and analysis code fingerprint all match.
+Receipt or payload changes invalidate reuse; a completed result is never
+overwritten.
+
+Manufacturer and capture-date sharing is reported as subgroup context. It does
+not by itself block the Holdout. Blocking evidence is mapped from the
+provider-split leakage audit to the actual group Manifest assignments:
+identical image/annotation/sensor files, sample-ID identity, production
+sessions, capture-group identity, exact timestamped sensor windows, and
+confirmed image/sensor similarity groups cross Train/Validation/Test boundaries
+are blocked. Manufacturer-only and source-token sharing are not leakage findings
+by themselves.
