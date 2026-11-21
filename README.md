@@ -297,6 +297,10 @@ Use the separate `ict integrity test-release-preflight` and
 `ict integrity test-release-seal` commands before any internal same-source Test
 evaluation. They preserve the split and artifacts and emit separate
 `preflight.json` and `seal-verification.json` receipts.
+If a trusted historical public hash index is unavailable, use
+`ict integrity limited-holdout-evaluate` only for a separate limited internal
+holdout estimate. It requires explicit Test access approval and keeps the strict
+seal and independent-evaluation fields explicitly false.
 
 ## Audit and prepare multimodal data
 

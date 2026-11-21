@@ -176,3 +176,60 @@ set and 0.5 threshold are frozen, and the two model checkpoints plus Detector
 initialization match their receipts. If reservation history is unverified,
 the holdout may remain usable for an internal same-source estimate, but the
 command must not claim independent or historical reservation clearance.
+
+## Limited Internal Holdout evaluation
+
+When no trusted historical public hash index exists, the strict Test Release
+Gate remains blocked. `ict integrity limited-holdout-evaluate` provides a
+separate, explicitly limited internal estimate. It does not set
+`seal_verification_allowed=true`, does not set `final_evaluation_allowed=true`,
+and does not change any Test Release preflight or seal receipt.
+
+The command revalidates the existing preflight and all live production receipts
+before it opens Test payloads. It requires the fixed Image-only Epoch 27 and
+Sensor Concat Epoch 15 checkpoints, threshold 0.5, canonical class order,
+Train-fitted sensor preprocessing, matching Detector initialization provenance,
+and exactly 1,472 fixed Test sample IDs. Test payload access requires
+`--approve-test-access`.
+
+```text
+ict integrity limited-holdout-evaluate \
+  --root data/extracted \
+  --bundle outputs/group-split \
+  --revision-id <group-revision-sha256> \
+  --preflight outputs/test-release-preflight/preflight.json \
+  --group-verification outputs/group-verification/verification.json \
+  --cohort outputs/group-cohort/training-cohort.json \
+  --frozen-validation outputs/frozen-validation/frozen-validation.json \
+  --preprocessing outputs/frozen-sensor/sensor-state.json \
+  --image-run runs/image-only \
+  --concat-run runs/sensor-concat \
+  --detector-initialization <completed-detector-or-finalized-directory> \
+  --prior-test-manifest <earlier-reservation-manifest.csv> \
+  --approve-test-access \
+  --out outputs/limited-internal-holdout
+```
+
+After approval, the command validates image, annotation and XLSX structure,
+the fixed sample and COCO label correspondence, Train/Validation/Test file
+hashes, existing image/sensor similarity evidence, and split assignments. It
+creates an evaluation-time SHA-256 payload snapshot. That snapshot is not a
+historical original-hash index or a reverified payload seal.
+
+The fixed checkpoints score the same 1,472 Test records with frozen
+preprocessing and threshold 0.5. No Test-based threshold, preprocessing,
+checkpoint or sample selection is performed. The JSON and CSV exports contain
+macro AUROC/F1, micro F1, positive-supported macro F1, per-class confusion
+counts and FPR, manufacturer and capture-date groups, and a direct model
+comparison.
+
+Every result explicitly records `evaluation_origin=internal_same_source`,
+`evaluation_protocol=limited_internal_holdout`,
+`historical_reservation_status=unverified`,
+`historical_payload_seal_verified=false`,
+`external_independence_verified=false`, and
+`production_session_independence_verified=false`.
+
+To resume an interrupted run, pass `--resume` with the same output directory.
+Resume is permitted only when the fixed plan fingerprint and evaluation-time
+payload snapshot match. A completed result is never overwritten.

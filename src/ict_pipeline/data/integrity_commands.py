@@ -207,6 +207,62 @@ def test_release_seal(
         typer.echo(json.dumps(receipt, indent=2))
 
 
+@integrity_app.command("limited-holdout-evaluate")
+def limited_holdout_evaluate(
+    root: SourceRoot,
+    bundle: Annotated[Path, typer.Option(help="Existing published group-aware split bundle.")],
+    revision_id: Annotated[str, typer.Option(help="Expected published revision SHA-256.")],
+    preflight: Annotated[Path, typer.Option(help="Existing passing test-release-preflight receipt.")],
+    group_verification: Annotated[Path, typer.Option(help="Passing verify-group verification.json.")],
+    cohort: Annotated[Path, typer.Option(help="Sanitized audited product training cohort.")],
+    frozen_validation: Annotated[Path, typer.Option(help="Frozen Validation artifact.")],
+    preprocessing: Annotated[Path, typer.Option(help="Fitted Train-only sensor preprocessing state.")],
+    image_run: Annotated[Path, typer.Option(help="Completed Image-only run containing Epoch 27.")],
+    concat_run: Annotated[Path, typer.Option(help="Completed Sensor Concat run containing Epoch 15.")],
+    out: Annotated[Path, typer.Option(help="Fresh output directory, or existing interrupted run with --resume.")],
+    detector_initialization: Annotated[Path | None, typer.Option(
+        help="Completed verified Detector run or finalized Detector artifact.",
+    )] = None,
+    prior_test_manifest: Annotated[list[Path] | None, typer.Option(
+        help="Earlier reserved Test manifest. Repeat for each applicable reservation.",
+    )] = None,
+    approve_test_access: Annotated[bool, typer.Option(
+        "--approve-test-access",
+        help="Explicitly authorize opening and evaluating the internal Test payload.",
+    )] = False,
+    resume: Annotated[bool, typer.Option(
+        "--resume",
+        help="Resume only when the fixed plan and payload snapshot match.",
+    )] = False,
+) -> None:
+    """Run a limited internal holdout evaluation without changing the strict Test Release Gate."""
+    from ..evaluation.limited_holdout import evaluate_limited_holdout
+
+    root, bundle, preflight, group_verification, cohort, frozen, preprocessing, image_run, concat_run, out = (
+        path.expanduser().resolve() for path in (
+            root, bundle, preflight, group_verification, cohort, frozen_validation,
+            preprocessing, image_run, concat_run, out,
+        )
+    )
+    detector = detector_initialization.expanduser().resolve() if detector_initialization is not None else None
+    prior = tuple(path.expanduser().resolve() for path in (prior_test_manifest or ()))
+    with _command(root, bundle, preflight, group_verification, cohort, frozen, preprocessing,
+                  image_run, concat_run, out, detector, *prior) as credentials:
+        if not approve_test_access:
+            raise ValueError("Limited Holdout evaluation requires --approve-test-access.")
+        if out.is_relative_to(bundle):
+            raise ValueError("Write holdout results outside the published split bundle.")
+        result = evaluate_limited_holdout(
+            root=root, bundle=bundle, revision_id=revision_id, preflight=preflight,
+            group_verification=group_verification, cohort=cohort,
+            frozen_validation=frozen, preprocessing=preprocessing,
+            image_run=image_run, concat_run=concat_run, out=out,
+            approve_test_access=approve_test_access,
+            detector_initialization=detector, prior_manifests=prior, resume=resume,
+        )
+        typer.echo(json.dumps(credentials.redact(result), indent=2, allow_nan=False))
+
+
 @integrity_app.command()
 def finalize_detector(
     source_run: Annotated[Path, typer.Option(help="Original failed Faster R-CNN run directory.")],

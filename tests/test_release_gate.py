@@ -17,6 +17,11 @@ from ict_pipeline.data.test_release_gate import (
 from ict_pipeline.evaluation.product import read_artifact, write_artifact
 from ict_pipeline.evaluation.product_protocol import FrozenValidation
 from ict_pipeline.pipeline.store import digest_json, fingerprint_path
+from ict_pipeline.evaluation.limited_holdout import (
+    _subset_metrics,
+    LIMITATION_FIELDS,
+    evaluate_limited_holdout,
+)
 
 
 def _sha(path: Path) -> str:
@@ -165,3 +170,45 @@ def test_seal_requires_preflight_revalidation_inputs(tmp_path: Path) -> None:
             preflight_receipt=preflight, preflight_path=preflight_path,
             public_index=index,
         )
+
+
+def test_limited_holdout_requires_explicit_test_access(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="approve-test-access"):
+        evaluate_limited_holdout(
+            root=tmp_path / "source", bundle=tmp_path / "bundle",
+            revision_id="a" * 64, preflight=tmp_path / "preflight.json",
+            group_verification=tmp_path / "verification.json",
+            cohort=tmp_path / "cohort.json", frozen_validation=tmp_path / "frozen.json",
+            preprocessing=tmp_path / "sensor-state.json",
+            image_run=tmp_path / "image", concat_run=tmp_path / "concat",
+            out=tmp_path / "holdout", approve_test_access=False,
+        )
+
+
+def test_limited_holdout_subgroup_metrics_and_limitations() -> None:
+    ids = ["test-a", "test-b", "test-c", "test-d"]
+    scores = {
+        "test-a": (0.9, 0.1, 0.1, 0.1, 0.1),
+        "test-b": (0.1, 0.9, 0.1, 0.1, 0.1),
+        "test-c": (0.1, 0.1, 0.1, 0.1, 0.1),
+        "test-d": (0.9, 0.1, 0.9, 0.1, 0.1),
+    }
+    records = {
+        sample_id: {"labels": tuple(index == (0 if sample_id != "test-b" else 1)
+                                    for index in range(5))}
+        for sample_id in ids
+    }
+    metrics = _subset_metrics(ids, scores, records, ids)
+    assert metrics["sample_count"] == 4
+    assert set(metrics) >= {"macro_auroc", "macro_f1", "micro_f1",
+                            "positive_supported_macro_f1", "classes"}
+    assert all("tp" in row and "fp" in row and "fn" in row and "tn" in row
+               and "fpr" in row for row in metrics["classes"])
+    assert LIMITATION_FIELDS == {
+        "evaluation_origin": "internal_same_source",
+        "evaluation_protocol": "limited_internal_holdout",
+        "historical_reservation_status": "unverified",
+        "historical_payload_seal_verified": False,
+        "external_independence_verified": False,
+        "production_session_independence_verified": False,
+    }
