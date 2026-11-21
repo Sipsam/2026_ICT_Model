@@ -13,23 +13,27 @@ from tempfile import NamedTemporaryFile
 from typing import Any, Literal
 
 from ..config.settings import Credentials
+from ..data.detector_finalization import RECEIPT, verify_finalized_detector
+from ..data.group_retraining import _assignments, _check_prior_test, read_verification_receipt
 from ..data.model import Progress
 from ..data.preprocessing.common import require_separate_output, write_json
 from ..data.preprocessing.console import fresh_output, protect_source_data
 from ..data.preprocessing.leakage import METHODS, MODALITIES, file_sha
 from ..data.preprocessing.policy import SPLIT_MAP
+from ..data.preprocessing.revision import read_publication
 from ..evaluation.contracts import CLASSES
 from ..evaluation.product import _environment, _metric, classification_metrics, read_artifact
 from ..evaluation.product_protocol import ExperimentReport, FrozenValidation, ProductProtocol
 from ..models.contracts import ModelName, TrainConfig
 from ..models.registry import REGISTRY, resolve_device
-from ..pipeline.store import digest_json
+from ..models.weights import LAYOUTS
+from ..pipeline.store import _reject_link, digest_json, fingerprint_path
 from .audit import Cohort
 from .contracts import Record
 from .dataset import MultimodalDataset, collate
 from .model_config import image_preprocessing_fingerprint
 from .preprocessing import PreprocessingState, training_fingerprint, transform_sensor
-from .training_plan import ProductTrainingConfig, _in_training_scope, _views
+from .training_plan import ProductTrainingConfig, _in_training_scope, _load_index, _views
 
 AnalysisMode = Literal["all", "leakage", "groups", "ablation"]
 ModelRole = Literal["image", "concat"]
@@ -50,20 +54,115 @@ class AnalysisRun:
     architecture_fingerprint: str
 
 
+@dataclass(frozen=True)
+class GroupAnalysisInputs:
+    verification: Path
+    bundle: Path
+    detector: Path
+    prior_test_manifests: tuple[Path, ...] = ()
+
+
+def _verify_group_run(
+    saved: dict[str, Any], profile: ProductTrainingConfig, cohort: Cohort, frozen: FrozenValidation,
+    inputs: GroupAnalysisInputs, progress: Progress,
+) -> tuple[Cohort, dict[str, Any]]:
+    receipt, fingerprint = read_verification_receipt(inputs.verification)
+    if fingerprint != saved["profile"]["group_verification"]:
+        raise ValueError("Group Verification Receipt fingerprint differs from run.json.")
+    if receipt["revision_id"] != profile.revision_id or receipt["revision_id"] != cohort.revision_id:
+        raise ValueError("Group Split Revision differs from the verification receipt.")
+    if (
+        receipt["cohort_fingerprint"] != cohort.fingerprint
+        or receipt["split_fingerprint"] != cohort.split_fingerprint
+        or receipt["manifest_fingerprint"] != cohort.manifest_fingerprint
+        or saved.get("split_fingerprint") != cohort.split_fingerprint
+        or saved.get("dataset_fingerprint") != cohort.input_fingerprint
+        or receipt["preprocessing_fingerprint"] != saved["preprocessing_fingerprint"]
+        or receipt["training_fingerprint"] != saved["train_state_fingerprint"]
+    ):
+        raise ValueError("Group Cohort or Train preprocessing differs from the verification receipt or run.json.")
+    if (receipt["frozen_validation_fingerprint"] != frozen.identity.cohort_fingerprint
+            or receipt["frozen_validation_count"] != len(frozen.identity.sample_ids)):
+        raise ValueError("FrozenValidation differs from the group verification receipt.")
+    revision, seal, rows = read_publication(inputs.bundle, profile.revision_id)
+    _assignments(revision, rows)
+    if (seal != receipt["publication_fingerprint"] or seal != saved.get("seal_fingerprint")
+            or revision["selected_manifest_fingerprint"] != receipt["manifest_fingerprint"]
+            or receipt["test"]["origin"] != revision["test_origin"]
+            or receipt["test"]["payloads_opened"] is not False):
+        raise ValueError("Group publication or Test custody differs from the verification receipt.")
+    prior = _check_prior_test(rows, inputs.prior_test_manifests)
+    if sorted(prior) != sorted(receipt["prior_test_manifest_fingerprints"]):
+        raise ValueError("Supply the exact prior Test reservation manifests recorded in the group verification receipt.")
+
+    initialization = profile.detector_initialization
+    layout = profile.architecture.image.detector
+    backend = REGISTRY[ModelName.FASTER_RCNN]
+    provenance = {
+        "format": backend.checkpoint_format, "architecture": LAYOUTS["faster_rcnn"].architecture,
+        "sha256": initialization.sha256,
+    }
+    _reject_link(inputs.detector.parent)
+    _reject_link(inputs.detector)
+    detector_run = inputs.detector.parent / "run.json"
+    finalization = inputs.detector.parent / RECEIPT
+    if finalization.exists() or finalization.is_symlink():
+        if detector_run.exists() or detector_run.is_symlink():
+            raise ValueError("Use a separate finalized Detector directory.")
+        provenance["finalization_fingerprint"] = verify_finalized_detector(
+            inputs.detector, initialization.sha256, layout, receipt, fingerprint, inputs.bundle,
+        )
+    else:
+        _reject_link(detector_run)
+        detector = json.loads(detector_run.read_bytes())
+        if (
+            detector.get("status") != "completed" or detector.get("model") != "faster_rcnn"
+            or detector.get("architecture") != provenance["architecture"]
+            or detector.get("dataset_revision") != {
+                "group_split_revision": profile.revision_id, "group_verification": fingerprint,
+                "detector_scope": receipt["detector_scope"],
+            }
+            or detector.get("initialization_mode") != layout.layout
+            or (detector.get("configuration") or {}).get("image_size") != layout.image_size
+            or (detector.get("checkpoints") or {}).get("best") != {
+                "path": inputs.detector.name, "fingerprint": fingerprint_path(inputs.detector),
+            }
+            or file_sha(inputs.detector) != initialization.sha256
+        ):
+            raise ValueError("Detector initialization differs from the completed verified group Detector.")
+    if provenance != saved.get("detector_initialization"):
+        raise ValueError("Detector initialization provenance differs from run.json.")
+    scoped, live_seal, _ = _load_index(profile, frozen, progress)
+    if live_seal != seal:
+        raise ValueError("Group publication changed during analysis verification.")
+    return scoped, {
+        "role_split": "verified_group_revision", "group_verification": fingerprint,
+        "group_split_revision": profile.revision_id, "publication_fingerprint": seal,
+        "prior_test_manifest_fingerprints": prior, "detector_initialization": provenance,
+    }
+
+
 def _inspect_run(
     role: ModelRole, run: Path, root: Path, cohort_path: Path, frozen_path: Path,
     cohort: Cohort, frozen: FrozenValidation,
+    *, group: GroupAnalysisInputs | None = None, progress: Progress = lambda *_: None,
 ) -> AnalysisRun:
     raw = (run / "run.json").read_bytes()
     saved = json.loads(raw)
     if saved["schema_version"] != 1 or saved["task"] != "product_classification" or saved["status"] != "completed":
         raise ValueError(f"{role}: expected a completed product training run.")
+    has_group = saved["profile"].get("group_verification") is not None
+    if has_group != (group is not None):
+        raise ValueError(f"{role}: group analysis requires matching run provenance and --group-verification, "
+                         "--group-bundle and --detector-initialization.")
     state_path = run / "sensor-state.json"
     profile = ProductTrainingConfig.model_validate_json(json.dumps({
-        **saved["profile"], "source": str(root), "bundle": str(root), "cohort": str(cohort_path),
+        **saved["profile"], "source": str(root), "bundle": str(group.bundle if group else root),
+        "cohort": str(cohort_path), "group_verification": str(group.verification) if group else None,
         "preprocessing": str(state_path),
         "validation": {**saved["profile"]["validation"], "cohort": str(frozen_path)},
-        "detector_initialization": {**saved["profile"]["detector_initialization"], "path": str(root)},
+        "detector_initialization": {**saved["profile"]["detector_initialization"],
+                                    "path": str(group.detector if group else root)},
     }))
     if (
         profile.branch != ("image" if role == "image" else "paired")
@@ -88,6 +187,9 @@ def _inspect_run(
     scoped = cohort.model_copy(update={"records": tuple(
         row for row in cohort.records if _in_training_scope(row.split, row.sample_id, selected)
     )})
+    split_provenance = {"role_split": "provider_split"}
+    if group is not None:
+        scoped, split_provenance = _verify_group_run(saved, profile, cohort, frozen, group, progress)
     train, validation, counts = _views(profile, scoped, state, frozen)
     recorded = saved["samples"]
     if not isinstance(recorded, dict):
@@ -103,7 +205,7 @@ def _inspect_run(
     if actual_ids != expected_ids:
         raise ValueError(f"{role}: reconstructed Validation sample IDs differ from FrozenValidation "
                          f"(expected {len(expected_ids)}, got {len(actual_ids)}).")
-    if any(row.split != row.provider_split for row in (*train.records, *validation.records)):
+    if group is None and any(row.split != row.provider_split for row in (*train.records, *validation.records)):
         raise ValueError(f"{role}: reconstructed sample split differs from the original provider split.")
 
     selected = saved["selected_checkpoint"]
@@ -139,6 +241,7 @@ def _inspect_run(
         "training_samples": counts["train"], "validation_samples": counts["validation"],
         "selected_macro_auroc": report.macro_metric("auroc"), "selected_macro_f1": report.macro_metric("f1"),
         "protocol": protocol.model_dump(mode="json"),
+        **split_provenance,
     }, saved["architecture_fingerprint"])
 
 
@@ -487,6 +590,7 @@ def analyze(
     root: Path, audit_path: Path, cohort_path: Path, frozen_path: Path, runs: dict[ModelRole, Path],
     out: Path, *, mode: AnalysisMode, seed: int, batch_size: int, device: str,
     credentials: Credentials, progress: ProgressFactory, checkpoint_dir: Path | None = None,
+    group: GroupAnalysisInputs | None = None,
 ) -> None:
     """Verify run identities and publish a complete analysis in a fresh directory."""
     if batch_size < 1 or seed < 0 or mode not in ("all", "leakage", "groups", "ablation"):
@@ -497,6 +601,8 @@ def analyze(
     if mode == "ablation":
         runs = {"concat": runs["concat"]}
     inputs = (root, audit_path, cohort_path, frozen_path, *runs.values())
+    if group is not None:
+        inputs += (group.verification, group.bundle, group.detector.parent, *group.prior_test_manifests)
     for path in (*inputs, out):
         credentials.protect_path(str(path.resolve()), "Multimodal analysis path")
     for path in inputs:
@@ -522,8 +628,8 @@ def analyze(
     inspected = {}
     leakage = {}
     for done, (role, path) in enumerate(runs.items(), 2):
-        progress(f"Verify {role} run and project leakage")
-        run = _inspect_run(role, path, root, cohort_path, frozen_path, cohort, frozen)
+        verify = progress(f"Verify {role} run and project leakage")
+        run = _inspect_run(role, path, root, cohort_path, frozen_path, cohort, frozen, group=group, progress=verify)
         inspected[role] = run
         leakage[role] = project_leakage(audit, run.train, run.validation.records)
         prepare(done, len(runs) + 1)
@@ -583,6 +689,7 @@ def analyze(
     config = {
         "schema_version": 1, "mode": mode, "seed": seed, "batch_size": batch_size, "device": device,
         "audit_sha256": hashlib.sha256(audit_bytes).hexdigest(), "audit_configuration": audit.get("configuration"),
+        "audit_fingerprint": digest_json(audit), "audit_source_identity_split": "provider_split",
         "cohort_fingerprint": cohort.fingerprint, "validation_identity": frozen.identity.model_dump(mode="json"),
         "models": {role: run.provenance for role, run in inspected.items()}, **_environment(),
         "group_policy": {"image_similarity": "project_provider_components-v1", "manufacturer": "cohort.source_group",

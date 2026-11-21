@@ -155,9 +155,13 @@ def analyze_command(
     batch_size: Annotated[int, typer.Option(min=1)] = 1,
     device: Annotated[str, typer.Option(help="Evaluation device: cpu, cuda, rocm, or mps.")] = "cpu",
     checkpoint_dir: Annotated[Path | None, typer.Option(help="Separate directory for resumable score batches.")] = None,
+    group_verification: Annotated[Path | None, typer.Option(help="Passing verification.json pinned by the group runs.")] = None,
+    group_bundle: Annotated[Path | None, typer.Option(help="Published bundle for the verified group revision.")] = None,
+    detector_initialization: Annotated[Path | None, typer.Option(help="Original Detector best checkpoint used by the group runs.")] = None,
+    prior_test_manifest: Annotated[list[Path] | None, typer.Option(help="Repeat for each prior Test manifest recorded by group verification.")] = None,
 ) -> None:
     """Analyze cohort leakage, Validation subgroups and sensor dependence."""
-    from .analysis import analyze
+    from .analysis import GroupAnalysisInputs, analyze
 
     credentials = Credentials()
     active_stage = "Check analysis options and paths"
@@ -171,6 +175,12 @@ def analyze_command(
         credentials = SetupFiles.read(Path.cwd(), None).credentials(os.environ)
         if mode not in ("all", "leakage", "groups", "ablation") or device not in ("cpu", "cuda", "rocm", "mps"):
             raise ValueError("Choose a supported --mode and --device. See analyze --help.")
+        group = None
+        if group_verification is not None and group_bundle is not None and detector_initialization is not None:
+            group = GroupAnalysisInputs(group_verification, group_bundle, detector_initialization,
+                                        tuple(prior_test_manifest or ()))
+        elif any((group_verification, group_bundle, detector_initialization, prior_test_manifest)):
+            raise ValueError("Supply --group-verification, --group-bundle and --detector-initialization together.")
         runs = {}
         if image_run is not None:
             runs["image"] = image_run
@@ -178,7 +188,7 @@ def analyze_command(
             runs["concat"] = concat_run
         analyze(root, audit, cohort, frozen_validation, runs, out, mode=mode, seed=seed, batch_size=batch_size,
                 device=device, credentials=credentials, progress=progress,
-                checkpoint_dir=checkpoint_dir)
+                checkpoint_dir=checkpoint_dir, group=group)
         typer.echo(credentials.redact_text(f"Published multimodal analysis to {out}"))
     except KeyboardInterrupt:
         raise typer.Exit(130) from None
@@ -191,6 +201,6 @@ def analyze_command(
         typer.echo(f"Multimodal analysis failed during '{active_stage}' ({type(exc).__name__}). "
                    "Check the inputs for this stage.", err=True)
         raise typer.Exit(2) from None
-    except (OSError, ValueError, SetupError, TrainingError, RuntimeError) as exc:
+    except (OSError, ValueError, SetupError, PipelineError, TrainingError, RuntimeError) as exc:
         typer.echo(credentials.redact_text(f"Multimodal analysis failed during '{active_stage}'. {exc}"), err=True)
         raise typer.Exit(2) from None

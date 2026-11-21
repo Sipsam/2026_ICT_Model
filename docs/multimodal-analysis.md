@@ -40,6 +40,43 @@ directory. Complete score batches are fingerprinted and published atomically.
 Images are still checked against the cohort when a batch is reused. The final
 report directory is published only after all requested reports are complete.
 
+## Verified group-aware runs
+
+Set `SOURCE`, `BUNDLE`, `INDEX`, and `VERIFY` to the paths used for group
+training. Set `DETECTOR_BEST` to the original Detector checkpoint with its
+adjacent `run.json` or `finalization.json`. Set `GROUP_RUNS` to the group
+experiment directory and `results` to the directory containing the original
+sensor integrity audit.
+
+```bash
+ict multimodal analyze \
+  --root "$SOURCE" --audit "$results/sensor-integrity-analysis/leakage.json" \
+  --cohort "$INDEX/training-cohort.json" \
+  --frozen-validation "$INDEX/frozen-validation.json" \
+  --group-verification "$VERIFY/verification.json" --group-bundle "$BUNDLE" \
+  --detector-initialization "$DETECTOR_BEST" \
+  --concat-run "$GROUP_RUNS/product/fpn-sensor-concat" \
+  --mode ablation --device cuda --batch-size 1 \
+  --checkpoint-dir "$GROUP_RUNS/sensor-ablation-batches" \
+  --out "$GROUP_RUNS/sensor-ablation"
+```
+
+Add one `--prior-test-manifest /path/to/manifest.csv` per prior reservation
+manifest recorded in the group verification receipt. For subgroup metrics, use
+`--mode groups --image-run "$GROUP_RUNS/product/fpn-image-only"` and choose a
+fresh output directory. Use `--mode all` with both runs to produce both reports
+in one command.
+
+The command verifies the group receipt against each run, rechecks the sealed
+assignments and scoped Train/Validation source hashes, and checks the original
+Detector provenance. Test contributes reservation metadata only. The input
+`--audit` must be the original integrity audit. The `fpn-generalization-v1/leakage.json`
+file is an analysis result. `analysis.json` records the audit fingerprint,
+the provider split used for source identity, and the verified revision used
+to assign Train and Validation roles.
+
+## Analysis outputs
+
 - `leakage.json` and `leakage.csv` report cross-split group membership and counts
   per model. In the JSON, `any_method_ids` is the union across findings.
   `image_similarity` and `sensor_similarity` are projected memberships in

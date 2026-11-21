@@ -1,30 +1,38 @@
 import json
 from pathlib import Path
+from typing import IO, Any
 
 import pytest
+from PIL import Image
 from typer.testing import CliRunner
 
 from ict_pipeline.cli import app
+from ict_pipeline.config.settings import Credentials
+from ict_pipeline.data import detector_finalization
+from ict_pipeline.data.group_retraining import GroupInputs, verify_group_retraining
 from ict_pipeline.data.preprocessing.common import read_csv, write_csv, write_json
 from ict_pipeline.data.preprocessing.leakage import AnalysisConfig, analyze_leakage, file_sha
+from ict_pipeline.data.preprocessing.split import SplitConfig, plan_split, publish_split
 from ict_pipeline.evaluation.product import classification_metrics, read_artifact, write_artifact
 from ict_pipeline.evaluation.product_protocol import ExperimentReport, FrozenValidation
 from ict_pipeline.inspection.contracts import ProductModelIdentity
 from ict_pipeline.multimodal import analysis
-from ict_pipeline.multimodal.audit import Cohort
+from ict_pipeline.models.weights import LAYOUTS
+from ict_pipeline.multimodal.audit import Cohort, audit_cohort
 from ict_pipeline.multimodal.model_config import FusionConfig, ImageEncoderConfig
-from ict_pipeline.multimodal.preprocessing import PreprocessingState
+from ict_pipeline.multimodal.preprocessing import PreprocessingConfig, PreprocessingState, fit_preprocessor
 from ict_pipeline.multimodal.training_plan import (
     DetectorInitialization, ProductTrainingConfig, ProductTrainingPlan, _load_index, _views,
 )
-from ict_pipeline.pipeline.store import digest_json
+from ict_pipeline.pipeline.store import digest_json, fingerprint_path
 
+from test_multimodal import _sample
 from test_product_training import profile  # noqa: F401
 
 
 def _run(profile: ProductTrainingConfig, folder: Path, role: analysis.ModelRole, epoch: int) -> Path:
     frozen = read_artifact(profile.validation.cohort, FrozenValidation)
-    cohort, _, _ = _load_index(profile, frozen, lambda *_: None)
+    cohort, seal, _ = _load_index(profile, frozen, lambda *_: None)
     state = PreprocessingState.load(profile.preprocessing)
     architecture = profile.architecture.model_copy(update={
         "image": ImageEncoderConfig.model_validate({"kind": "faster_rcnn_fpn", "detector": {"image_size": 640}}),
@@ -35,7 +43,8 @@ def _run(profile: ProductTrainingConfig, folder: Path, role: analysis.ModelRole,
         "architecture": architecture, "branch": "paired" if role == "concat" else "image",
         "checkpoint_policy": "best_validation", "selection_metric": "macro_auroc",
         "validation": profile.validation.model_copy(update={"frequency": "each_epoch"}),
-        "detector_initialization": DetectorInitialization(path=folder / "unused.pt", sha256="a" * 64),
+        "detector_initialization": profile.detector_initialization or
+        DetectorInitialization(path=folder / "unused.pt", sha256="a" * 64),
     })
     train, validation, counts = _views(config, cohort, state, frozen)
     plan = ProductTrainingPlan(config, folder, state, train, validation, frozen, {}, "", 0, 0, 0)
@@ -67,6 +76,17 @@ def _run(profile: ProductTrainingConfig, folder: Path, role: analysis.ModelRole,
         del saved[key]
     del saved["detector_initialization"]["path"]
     del saved["validation"]["cohort"]
+    group_metadata = {}
+    if profile.group_verification:
+        saved["group_verification"] = json.loads(profile.group_verification.read_bytes())["fingerprint"]
+        group_metadata = {
+            "dataset_fingerprint": cohort.input_fingerprint, "split_fingerprint": cohort.split_fingerprint,
+            "seal_fingerprint": seal,
+            "detector_initialization": {
+                "format": "ict-torch-state-v1", "architecture": LAYOUTS["faster_rcnn"].architecture,
+                "sha256": config.detector_initialization.sha256,
+            },
+        }
     write_json(folder / "run.json", {
         "schema_version": 1, "task": "product_classification", "status": "completed",
         "profile": saved, "validation_identity": frozen.identity.model_dump(mode="json"),
@@ -74,6 +94,7 @@ def _run(profile: ProductTrainingConfig, folder: Path, role: analysis.ModelRole,
         "samples": counts, "architecture_fingerprint": identity.architecture_fingerprint, "completed_epochs": 30,
         "selected_checkpoint": {"epoch": epoch, "path": model.relative_to(folder).as_posix(), "sha256": file_sha(model)},
         "validation_report": {"path": report.relative_to(folder).as_posix(), "sha256": file_sha(report)},
+        **group_metadata,
     })
     return folder
 
@@ -242,6 +263,231 @@ def test_analysis_reports_split_mismatch(
 
     with pytest.raises(ValueError, match=message):
         analysis._inspect_run("image", path, profile.source, profile.cohort, frozen_path, cohort, frozen)
+
+
+@pytest.fixture
+def group_analysis(tmp_path: Path) -> tuple[list[str], Path, Path, set[Path]]:
+    source, bundle = tmp_path / "source", tmp_path / "bundle"
+    manifest = tmp_path / "provider.csv"
+    rows = [_sample(source, i, normal=i % 2 == 0, values=(5 * i, 5 * i + 1, 5 * i + 2))
+            for i in range(1, 7)]
+    for i, row in enumerate(rows, 1):
+        color = tuple(255 if i & bit else 0 for bit in (1, 2, 4))
+        Image.new("RGB", (24, 18), color).save(source / row["image_path"])
+    write_csv(manifest, rows, list(rows[0]))
+    audit = analyze_leakage(source, manifest, source, AnalysisConfig(verify_xlsx=True))
+    audit_path = tmp_path / "sensor-integrity-analysis" / "leakage.json"
+    audit_path.parent.mkdir()
+    write_json(audit_path, {"fingerprint": digest_json(audit), "report": audit})
+    plan = plan_split(audit, SplitConfig(val_fraction=0.25, test_fraction=0.25,
+                                       group_near_images=True, group_near_sensors=True))
+    publish_split(source, manifest, source, audit, plan, bundle, export_detection=True,
+                  allow_missing_classes=True, progress=lambda _: lambda *_: None)
+    revision_path = bundle / "split.json"
+    cohort = audit_cohort(source, bundle / "manifest.csv", revision_path=revision_path).for_product_training()
+    index = tmp_path / "training-cohort.json"
+    write_json(index, {"cohort": cohort.model_dump(mode="json"), "fingerprint": cohort.fingerprint})
+    assert any(row.split == "validation" and row.provider_split == "train" for row in cohort.records)
+    frozen = FrozenValidation.from_audit(cohort, tuple(
+        row.sample_id for row in cohort.records if row.split == "validation"
+    ))
+    frozen_path = tmp_path / "frozen.json"
+    write_artifact(frozen_path, frozen)
+    state = fit_preprocessor(cohort, PreprocessingConfig())
+    state_path = tmp_path / "state.json"
+    write_json(state_path, state.payload())
+    prior = tmp_path / "prior.csv"
+    heldout = [row for row in read_csv(bundle / "manifest.csv") if row["split"] == "test"]
+    write_csv(prior, heldout, list(heldout[0]))
+    verified = verify_group_retraining(
+        GroupInputs(source, bundle, cohort.revision_id, index, cohort.fingerprint),
+        frozen, state, Credentials(), lambda _: lambda *_: None, prior_manifests=(prior,),
+    )
+    assert verified["passed"], verified["blockers"]
+    verification = tmp_path / "verification.json"
+    fingerprint = digest_json(verified)
+    write_json(verification, {"verification": verified, "fingerprint": fingerprint})
+    detector = tmp_path / "detector" / "best.pt"
+    detector.parent.mkdir()
+    detector.write_bytes(b"synthetic original Detector")
+    write_json(detector.parent / "run.json", {
+        "status": "completed", "model": "faster_rcnn", "architecture": LAYOUTS["faster_rcnn"].architecture,
+        "dataset_revision": {"group_split_revision": cohort.revision_id, "group_verification": fingerprint,
+                             "detector_scope": verified["detector_scope"]},
+        "initialization_mode": "scratch", "configuration": {"image_size": 640},
+        "checkpoints": {"best": {"path": detector.name, "fingerprint": fingerprint_path(detector)}},
+    })
+    config = ProductTrainingConfig.model_validate({
+        "source": source, "bundle": bundle, "cohort": index, "cohort_fingerprint": cohort.fingerprint,
+        "revision_id": cohort.revision_id, "preprocessing": state_path, "group_verification": verification,
+        "detector_initialization": {"path": detector, "sha256": file_sha(detector)},
+        "branch": "paired", "epochs": 30,
+        "architecture": {"preprocessing_fingerprint": state.fingerprint,
+                         "image": {"kind": "faster_rcnn_fpn", "detector": {"image_size": 640}}},
+        "validation": {"cohort": frozen_path, "fingerprint": frozen.identity.cohort_fingerprint},
+    })
+    concat = _run(config, tmp_path / "concat", "concat", 14)
+    image = _run(config, tmp_path / "image", "image", 30)
+    out = tmp_path / "analysis"
+    args = ["multimodal", "analyze", "--root", str(source), "--audit", str(audit_path), "--cohort", str(index),
+            "--frozen-validation", str(frozen_path), "--concat-run", str(concat), "--image-run", str(image),
+            "--out", str(out), "--group-verification", str(verification), "--group-bundle", str(bundle),
+            "--detector-initialization", str(detector), "--prior-test-manifest", str(prior)]
+    reserved = {source / row[key] for row in heldout for key in ("image_path", "sensor_path", "annotation_path")}
+    return args, out, concat / "run.json", reserved
+
+
+@pytest.mark.parametrize(("mode", "finalized"), [("ablation", False), ("groups", False), ("ablation", True)])
+def test_group_analysis_keeps_test_payloads_closed(
+    group_analysis: tuple[list[str], Path, Path, set[Path]], monkeypatch: pytest.MonkeyPatch,
+    mode: str, finalized: bool,
+) -> None:
+    args, out, concat_metadata, reserved = group_analysis
+    if finalized:
+        original_best = Path(args[args.index("--detector-initialization") + 1])
+        best = out.parent / "finalized" / "best.pt"
+        best.parent.mkdir()
+        best.write_bytes(original_best.read_bytes())
+        group = json.loads(Path(args[args.index("--group-verification") + 1]).read_bytes())["verification"]
+        revision = json.loads((original_best.parent / "run.json").read_bytes())["dataset_revision"]
+        record = {
+            "schema_version": 1, "status": detector_finalization.STATUS,
+            "reason": detector_finalization.REASON, "model": "faster_rcnn",
+            "architecture": detector_finalization.ARCHITECTURE,
+            "source": {"status": "failed", "error": detector_finalization.FAILURE,
+                       "run_fingerprint": "a" * 64, "run_json_sha256": "b" * 64},
+            "dataset_revision": revision,
+            **{key: group[key] for key in ("publication_fingerprint", "cohort_fingerprint", "split_fingerprint")},
+            "detector_layout": "scratch", "image_size": 640, "planned_epochs": 3,
+            "best_epoch": 1, "completed_epoch": 2, "best_val_loss": 0.1,
+            "checkpoints": {
+                "best": {"path": best.name, "sha256": file_sha(best), "fingerprint": fingerprint_path(best),
+                         "epoch": 1, "best_epoch": 1, "val_loss": 0.1, "best_loss": 0.1},
+                "last": {"epoch": 2, "best_epoch": 1, "best_loss": 0.1},
+            },
+            "checks": dict.fromkeys(("group_inputs", "checkpoint_fingerprints", "checkpoint_epochs_and_losses",
+                                     "best_model_layout_and_finiteness"), "passed") | {
+                "test_payloads_opened": False, "validation_inference": {"status": "not_run", "split": "val"},
+            },
+        }
+        fingerprint = digest_json(record)
+        write_json(best.parent / detector_finalization.RECEIPT, {"finalization": record, "fingerprint": fingerprint})
+        args[args.index("--detector-initialization") + 1] = str(best)
+        saved = json.loads(concat_metadata.read_bytes())
+        saved["detector_initialization"]["finalization_fingerprint"] = fingerprint
+        concat_metadata.write_text(json.dumps(saved), encoding="utf-8")
+    original = Path.open
+
+    def guard(path: Path, *args: Any, **kwargs: Any) -> IO[Any]:
+        assert path.resolve() not in reserved
+        assert not (path.is_relative_to(out.parent / "bundle" / "detection")
+                    and ("test" in path.parts or path.name == "instances_test.json"))
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guard)
+
+    def scores(
+        run: analysis.AnalysisRun, device: str, batch_size: int, donors: dict[str, dict[str, str]],
+        progress: analysis.ProgressFactory, checkpoint_dir: Path | None,
+    ) -> tuple[dict[str, analysis.Scores], dict[str, str]]:
+        assert all(row.split == "validation" and row.provider_split == "train" for row in run.validation.records)
+        values = {run.validation[i].sample_id: (0.8, 0.1, 0.1, 0.1, 0.1) for i in range(len(run.validation))}
+        return {key: values for key in ("original", *donors)}, {"sensor_removed": "untrained"} if donors else {}
+
+    monkeypatch.setattr(analysis, "score_run", scores)
+    result = CliRunner().invoke(app, [*args, "--mode", mode])
+    assert result.exit_code == 0, (result.output, result.exception)
+    config = json.loads((out / "analysis.json").read_bytes())
+    assert config["audit_source_identity_split"] == "provider_split"
+    assert config["models"]["concat"]["role_split"] == "verified_group_revision"
+    projected = json.loads((out / "leakage.json").read_bytes())["models"]["concat"]
+    assert projected["methods"]["source_day"]["validation_ids"] == projected["validation_ids"]
+    if finalized:
+        assert config["models"]["concat"]["detector_initialization"]["finalization_fingerprint"] == fingerprint
+    results = json.loads((out / f"{mode}.json").read_bytes())["results"]
+    if mode == "ablation":
+        assert {row["group"]: row["status"] for row in results} == {
+            "original": "measured", "within_manufacturer_shuffle": "measured",
+            "global_shuffle": "measured", "sensor_removed": "skipped",
+        }
+        failure = CliRunner().invoke(app, [*args, "--mode", mode, "--out", str(out.parent / "new"),
+                                          "--audit", str(out / "leakage.json")])
+        assert failure.exit_code == 2 and "leakage.json fingerprint" in failure.output
+    else:
+        assert {row["model"] for row in results} == {"image", "concat"}
+
+
+@pytest.mark.parametrize(("failure", "message"), [
+    ("receipt", "Group Verification Receipt fingerprint"),
+    ("revision", "Group Split Revision"),
+    ("cohort", "run profile, cohort or FrozenValidation"),
+    ("train", "sample fingerprints differ from run.json samples for train"),
+    ("validation", "sample fingerprints differ from run.json samples for validation"),
+    ("frozen", "FrozenValidation differs"),
+    ("prior", "Prior Test custody conflict"),
+    ("missing_prior", "exact prior Test reservation manifests"),
+    ("audit_path", "Leakage audit source differs"),
+    ("audit_hash", "Leakage audit source differs"),
+    ("detector", "Detector initialization provenance differs"),
+    ("unverified", "group analysis requires matching run provenance"),
+    ("missing_receipt", "group analysis requires matching run provenance"),
+    ("provider_guard", "split differs from the original provider split"),
+])
+def test_group_analysis_rejects_inconsistent_inputs(
+    group_analysis: tuple[list[str], Path, Path, set[Path]], failure: str, message: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args, out, run, _ = group_analysis
+    saved = json.loads(run.read_bytes())
+    if failure == "receipt":
+        saved["profile"]["group_verification"] = "0" * 64
+    elif failure == "revision":
+        saved["profile"]["revision_id"] = "0" * 64
+    elif failure == "cohort":
+        saved["profile"]["cohort_fingerprint"] = "0" * 64
+    elif failure in ("train", "validation"):
+        saved["samples"][failure]["sample_fingerprint"] = "0" * 64
+    elif failure == "frozen":
+        path = Path(args[args.index("--frozen-validation") + 1])
+        cohort = Cohort.load(Path(args[args.index("--cohort") + 1]))
+        frozen = read_artifact(path, FrozenValidation)
+        changed = FrozenValidation.from_audit(cohort, frozen.identity.sample_ids[:1])
+        path = path.with_name("changed-frozen.json")
+        write_artifact(path, changed)
+        args[args.index("--frozen-validation") + 1] = str(path)
+        saved["profile"]["validation"]["fingerprint"] = changed.identity.cohort_fingerprint
+        saved["validation_identity"] = changed.identity.model_dump(mode="json")
+    elif failure == "prior":
+        path = Path(args[args.index("--prior-test-manifest") + 1])
+        bundle = Path(args[args.index("--group-bundle") + 1])
+        row = next(row for row in read_csv(bundle / "manifest.csv") if row["split"] == "train")
+        path = path.with_name("changed-prior.csv")
+        write_csv(path, [{**row, "split": "test"}], list(row))
+        args[args.index("--prior-test-manifest") + 1] = str(path)
+    elif failure == "missing_prior":
+        args = args[:args.index("--prior-test-manifest")]
+    elif failure in ("audit_path", "audit_hash"):
+        path = Path(args[args.index("--audit") + 1])
+        report = json.loads(path.read_bytes())["report"]
+        ids = set(saved["validation_identity"]["sample_ids"])
+        row = next(row for row in report["samples"] if row["sample_id"] in ids)
+        row["paths" if failure == "audit_path" else "hashes"]["image_path"] = "changed"
+        path = path.with_name("changed-audit.json")
+        write_json(path, {"report": report, "fingerprint": digest_json(report)})
+        args[args.index("--audit") + 1] = str(path)
+    elif failure == "detector":
+        saved["detector_initialization"]["sha256"] = "0" * 64
+    elif failure == "missing_receipt":
+        args = args[:args.index("--group-verification")]
+    else:
+        del saved["profile"]["group_verification"]
+        if failure == "provider_guard":
+            args = args[:args.index("--group-verification")]
+    run.write_text(json.dumps(saved), encoding="utf-8")
+    monkeypatch.setattr(analysis, "score_run", lambda *_: pytest.fail("Invalid inputs must fail before scoring"))
+    result = CliRunner().invoke(app, [*args, "--mode", "ablation"])
+    assert result.exit_code == 2 and message in result.output, (result.output, result.exception)
+    assert not out.exists()
 
 
 def test_sensor_donors() -> None:
