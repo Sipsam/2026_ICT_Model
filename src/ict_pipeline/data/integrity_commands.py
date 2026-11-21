@@ -111,6 +111,12 @@ def test_release_preflight(
     prior_test_manifest: Annotated[list[Path] | None, typer.Option(
         help="Earlier reserved Test manifest. Repeat if multiple reservations are known.",
     )] = None,
+    detector_initialization: Annotated[Path | None, typer.Option(
+        help="Completed Detector run directory or finalized Detector artifact directory.",
+    )] = None,
+    public_index: Annotated[Path | None, typer.Option(
+        help="Optional trusted public Test hash index; required before Seal Verification.",
+    )] = None,
 ) -> None:
     """Preflight Test evaluation metadata and checkpoints without opening Test payloads."""
     from .test_release_gate import preflight_test_release
@@ -121,8 +127,12 @@ def test_release_preflight(
     ))
     root, bundle, group_verification, cohort, frozen_validation, preprocessing, image_run, concat_run, out = paths
     prior = tuple(path.expanduser().resolve() for path in (prior_test_manifest or ()))
+    detector = detector_initialization.expanduser().resolve() if detector_initialization is not None else None
+    public = public_index.expanduser().resolve() if public_index is not None else None
+    extra_paths = (*prior, *((detector,) if detector is not None else ()),
+                   *((public,) if public is not None else ()))
     with _command(root, bundle, group_verification, cohort, frozen_validation, preprocessing,
-                  image_run, concat_run, out, *prior) as credentials:
+                  image_run, concat_run, out, *extra_paths) as credentials:
         if out.exists():
             raise ValueError("Output already exists. Choose a fresh directory.")
         receipt = preflight_test_release(
@@ -130,6 +140,7 @@ def test_release_preflight(
             group_verification=group_verification, cohort=cohort,
             frozen_validation=frozen_validation, preprocessing=preprocessing,
             image_run=image_run, concat_run=concat_run, prior_manifests=prior,
+            detector_initialization=detector, public_index=public,
         )
         credentials.protect_path(json.dumps(receipt), "Test preflight receipt")
         with fresh_output(out, root) as temporary:
@@ -145,7 +156,20 @@ def test_release_seal(
     bundle: Annotated[Path, typer.Option(help="Pinned published split bundle containing the sealed Test split.")],
     preflight: Annotated[Path, typer.Option(help="Passing preflight.json from test-release-preflight.")],
     public_index: Annotated[Path, typer.Option(help="Public sanitized Test sample index with original hashes.")],
+    revision_id: Annotated[str, typer.Option(help="Expected published revision SHA-256.")],
+    group_verification: Annotated[Path, typer.Option(help="Passing verify-group verification.json.")],
+    cohort: Annotated[Path, typer.Option(help="Sanitized audited product training cohort.")],
+    frozen_validation: Annotated[Path, typer.Option(help="Frozen Validation artifact.")],
+    preprocessing: Annotated[Path, typer.Option(help="Fitted Train-only sensor preprocessing state.")],
+    image_run: Annotated[Path, typer.Option(help="Completed Image-only product training run directory.")],
+    concat_run: Annotated[Path, typer.Option(help="Completed Sensor Concat product training run directory.")],
     out: Annotated[Path, typer.Option(help="Fresh directory for the seal verification receipt.")],
+    detector_initialization: Annotated[Path | None, typer.Option(
+        help="Completed Detector run directory or finalized Detector artifact directory.",
+    )] = None,
+    prior_test_manifest: Annotated[list[Path] | None, typer.Option(
+        help="Earlier reserved Test manifest. Repeat if multiple reservations are known.",
+    )] = None,
     approve_seal_verification: Annotated[bool, typer.Option(
         "--approve-seal-verification",
         help="Explicitly authorize reading Test images, annotations and sensor payloads.",
@@ -154,10 +178,16 @@ def test_release_seal(
     """Reverify Test payload hashes only after explicit user approval."""
     from .test_release_gate import verify_test_payload_seal
 
-    root, bundle, preflight, public_index, out = (
-        path.expanduser().resolve() for path in (root, bundle, preflight, public_index, out)
+    root, bundle, preflight, public_index, out, revision_group, cohort, frozen, preprocessing, image_run, concat_run = (
+        path.expanduser().resolve() for path in (
+            root, bundle, preflight, public_index, out, group_verification, cohort,
+            frozen_validation, preprocessing, image_run, concat_run,
+        )
     )
-    with _command(root, bundle, preflight, public_index, out) as credentials:
+    detector = detector_initialization.expanduser().resolve() if detector_initialization is not None else None
+    prior = tuple(path.expanduser().resolve() for path in (prior_test_manifest or ()))
+    with _command(root, bundle, preflight, public_index, out, revision_group, cohort, frozen,
+                  preprocessing, image_run, concat_run, *prior, *((detector,) if detector is not None else ())) as credentials:
         if not approve_seal_verification:
             raise ValueError("Seal Verification requires --approve-seal-verification.")
         if out.exists():
@@ -166,6 +196,10 @@ def test_release_seal(
         receipt = verify_test_payload_seal(
             root=root, bundle=bundle, preflight_receipt=payload,
             preflight_path=preflight, public_index=public_index,
+            revision_id=revision_id, group_verification=revision_group,
+            cohort=cohort, frozen_validation=frozen, preprocessing=preprocessing,
+            image_run=image_run, concat_run=concat_run,
+            detector_initialization=detector, prior_manifests=prior,
         )
         credentials.protect_path(json.dumps(receipt), "Test seal verification receipt")
         with fresh_output(out, root) as temporary:

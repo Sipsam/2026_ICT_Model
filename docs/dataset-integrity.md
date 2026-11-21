@@ -112,6 +112,15 @@ Add `--prior-test-manifest <path>` for each known earlier reservation manifest.
 If none can be supplied, the receipt records
 `historical_reservation_status=unverified` and never converts that to verified
 historical clearance.
+Add `--detector-initialization <path>` for the completed Detector run directory
+or finalized Detector directory. Preflight reuses the production
+`multimodal/analysis.py` run verifier, including completed and
+`finalized_early` provenance. Add `--public-index <public-test-index.json>` when
+the custodian provides the official sanitized public SHA-256 index. The index
+must pin the revision, publication, manifest and exact image/annotation/sensor
+raw SHA-256 values. Missing historical hashes or a missing public index make
+Seal Verification impossible; the command does not calculate a new expected
+hash from the Test payload itself.
 
 Preflight verifies the pinned split and group receipt, prior reservation
 conflicts, sanitized duplicate and leakage evidence, the Image-only and Sensor
@@ -131,7 +140,16 @@ ict integrity test-release-seal \
   --root data/extracted \
   --bundle outputs/group-split \
   --preflight outputs/test-release-preflight/preflight.json \
-  --public-index <public-test-index-json-or-csv> \
+  --public-index <public-test-index.json> \
+  --revision-id <group-revision-sha256> \
+  --group-verification outputs/group-verification/verification.json \
+  --cohort outputs/group-cohort/training-cohort.json \
+  --frozen-validation outputs/frozen-validation/frozen-validation.json \
+  --preprocessing outputs/frozen-sensor/sensor-state.json \
+  --image-run runs/image-only \
+  --concat-run runs/sensor-concat \
+  --detector-initialization <completed-detector-or-finalized-directory> \
+  --prior-test-manifest <earlier-reservation-manifest.csv> \
   --approve-seal-verification \
   --out outputs/test-release-seal
 ```
@@ -141,6 +159,15 @@ IDs and public image, annotation and sensor hashes. Seal verification opens
 only the 1,472 Test payload paths listed by the pinned manifest and COCO Test
 index, verifies their hashes and reads their image/JSON/XLSX structure. It
 does not run model inference or calculate performance.
+It is JSON only and must have
+`schema_version`, `revision_id`, `publication_fingerprint`,
+`manifest_fingerprint`, `samples`, and an index `fingerprint` covering that
+identity. Each sample must contain `sample_id`, `image_sha256`,
+`annotation_sha256`, and `sensor_sha256` as lowercase 64-character raw file
+digests. CSV and manifest-only fallbacks are not accepted as evidence. There
+is no trusted Test payload hash in existing `leakage.json`, the sensor index,
+or split publication metadata alone; if the custodian has no independently
+published historical index, integrity verification is not possible.
 
 The seal output is `outputs/test-release-seal/seal-verification.json`.
 Final Test evaluation is allowed only when preflight and seal both pass,
