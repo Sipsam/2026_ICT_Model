@@ -293,6 +293,10 @@ Conversion keeps the original Train and Validation assignments and exports only 
 The four commands under `scripts/` retain their standalone arguments and default paths. Standalone manifests use the legacy repository-relative paths. Pass `--overwrite` to authorize replacing existing standalone reports. Standalone conversion requires a fresh output directory and keeps its legacy hard-link default. Pipeline conversion copies images.
 
 Use `ict integrity analyze` to measure overlap in the original AI Hub assignments and `ict integrity split --dry-run` to preview a group-aware revision. Published split bundles are opt-in through `ict run --split-bundle` or the standalone commands' `--dataset` option. The [dataset integrity and evaluation protocol](docs/dataset-integrity.md) describes the evidence, publication options, and Test roles.
+Use the separate `ict integrity test-release-preflight` and
+`ict integrity test-release-seal` commands before any internal same-source Test
+evaluation. They preserve the split and artifacts and emit separate
+`preflight.json` and `seal-verification.json` receipts.
 
 ## Audit and prepare multimodal data
 

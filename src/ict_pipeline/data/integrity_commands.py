@@ -96,6 +96,83 @@ def verify_group(
             raise typer.Exit(1)
 
 
+@integrity_app.command("test-release-preflight")
+def test_release_preflight(
+    root: SourceRoot,
+    bundle: Annotated[Path, typer.Option(help="Pinned published group-aware split bundle.")],
+    revision_id: Annotated[str, typer.Option(help="Expected published revision SHA-256.")],
+    group_verification: Annotated[Path, typer.Option(help="Passing verify-group verification.json.")],
+    cohort: Annotated[Path, typer.Option(help="Sanitized audited product training cohort.")],
+    frozen_validation: Annotated[Path, typer.Option(help="Frozen Validation artifact.")],
+    preprocessing: Annotated[Path, typer.Option(help="Fitted Train-only sensor preprocessing state.")],
+    image_run: Annotated[Path, typer.Option(help="Completed Image-only product training run directory.")],
+    concat_run: Annotated[Path, typer.Option(help="Completed Sensor Concat product training run directory.")],
+    out: Annotated[Path, typer.Option(help="Fresh directory for the preflight receipt.")],
+    prior_test_manifest: Annotated[list[Path] | None, typer.Option(
+        help="Earlier reserved Test manifest. Repeat if multiple reservations are known.",
+    )] = None,
+) -> None:
+    """Preflight Test evaluation metadata and checkpoints without opening Test payloads."""
+    from .test_release_gate import preflight_test_release
+
+    paths = tuple(path.expanduser().resolve() for path in (
+        root, bundle, group_verification, cohort, frozen_validation, preprocessing,
+        image_run, concat_run, out,
+    ))
+    root, bundle, group_verification, cohort, frozen_validation, preprocessing, image_run, concat_run, out = paths
+    prior = tuple(path.expanduser().resolve() for path in (prior_test_manifest or ()))
+    with _command(root, bundle, group_verification, cohort, frozen_validation, preprocessing,
+                  image_run, concat_run, out, *prior) as credentials:
+        if out.exists():
+            raise ValueError("Output already exists. Choose a fresh directory.")
+        receipt = preflight_test_release(
+            root=root, bundle=bundle, revision_id=revision_id,
+            group_verification=group_verification, cohort=cohort,
+            frozen_validation=frozen_validation, preprocessing=preprocessing,
+            image_run=image_run, concat_run=concat_run, prior_manifests=prior,
+        )
+        credentials.protect_path(json.dumps(receipt), "Test preflight receipt")
+        with fresh_output(out, root) as temporary:
+            write_json(temporary / "preflight.json", receipt)
+        typer.echo(json.dumps(receipt, indent=2))
+        if not receipt["passed"]:
+            raise typer.Exit(1)
+
+
+@integrity_app.command("test-release-seal")
+def test_release_seal(
+    root: SourceRoot,
+    bundle: Annotated[Path, typer.Option(help="Pinned published split bundle containing the sealed Test split.")],
+    preflight: Annotated[Path, typer.Option(help="Passing preflight.json from test-release-preflight.")],
+    public_index: Annotated[Path, typer.Option(help="Public sanitized Test sample index with original hashes.")],
+    out: Annotated[Path, typer.Option(help="Fresh directory for the seal verification receipt.")],
+    approve_seal_verification: Annotated[bool, typer.Option(
+        "--approve-seal-verification",
+        help="Explicitly authorize reading Test images, annotations and sensor payloads.",
+    )] = False,
+) -> None:
+    """Reverify Test payload hashes only after explicit user approval."""
+    from .test_release_gate import verify_test_payload_seal
+
+    root, bundle, preflight, public_index, out = (
+        path.expanduser().resolve() for path in (root, bundle, preflight, public_index, out)
+    )
+    with _command(root, bundle, preflight, public_index, out) as credentials:
+        if not approve_seal_verification:
+            raise ValueError("Seal Verification requires --approve-seal-verification.")
+        if out.exists():
+            raise ValueError("Output already exists. Choose a fresh directory.")
+        payload = json.loads(preflight.read_bytes())
+        receipt = verify_test_payload_seal(
+            root=root, bundle=bundle, preflight_receipt=payload,
+            preflight_path=preflight, public_index=public_index,
+        )
+        credentials.protect_path(json.dumps(receipt), "Test seal verification receipt")
+        with fresh_output(out, root) as temporary:
+            write_json(temporary / "seal-verification.json", receipt)
+        typer.echo(json.dumps(receipt, indent=2))
+
+
 @integrity_app.command()
 def finalize_detector(
     source_run: Annotated[Path, typer.Option(help="Original failed Faster R-CNN run directory.")],

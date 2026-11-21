@@ -84,3 +84,68 @@ The XLSX-verified scan inspected all 15,372 manifest rows and used 14,718 eligib
 All 15,372 rows lack a usable explicit production-session identifier. The four shared manufacturer groups cover all candidates. The image matches need visual and production-record review. Actual production-session independence cannot be established from this metadata.
 
 The seed-42 capture-group preview with both near-match options enabled assigned 11,038 Train, 2,208 Validation, and 1,472 internal Test candidates. Every split contained all five classes and background images. The largest selected group contained four candidates, and the enabled grouping methods left no candidate component spanning splits. Broad manufacturer and source/day overlaps remained. Grouping by manufacturer left only two groups supporting each of `cold_solder` and `short`, which precludes all five classes appearing in three splits under that strategy. These were dry-run results. The real-data assignments were kept in the existing AI Hub split.
+
+## Test Release Gate
+
+The Test Release Gate is separate from `ict integrity verify-group`. It does not
+change the group split, frozen Validation artifact, preprocessing state, or
+training checkpoints. It has two explicit phases.
+
+**Ubuntu preflight**, using only the published split metadata and sanitized
+training receipts:
+
+```text
+ict integrity test-release-preflight \
+  --root data/extracted \
+  --bundle outputs/group-split \
+  --revision-id <group-revision-sha256> \
+  --group-verification outputs/group-verification/verification.json \
+  --cohort outputs/group-cohort/training-cohort.json \
+  --frozen-validation outputs/frozen-validation/frozen-validation.json \
+  --preprocessing outputs/frozen-sensor/sensor-state.json \
+  --image-run runs/image-only \
+  --concat-run runs/sensor-concat \
+  --out outputs/test-release-preflight
+```
+
+Add `--prior-test-manifest <path>` for each known earlier reservation manifest.
+If none can be supplied, the receipt records
+`historical_reservation_status=unverified` and never converts that to verified
+historical clearance.
+
+Preflight verifies the pinned split and group receipt, prior reservation
+conflicts, sanitized duplicate and leakage evidence, the Image-only and Sensor
+Concat completed checkpoints, frozen preprocessing and threshold, canonical class
+order, and Detector initialization provenance. It does not open Test images,
+JSON annotations or sensor payloads.
+
+The preflight output is `outputs/test-release-preflight/preflight.json`.
+Its separate fields distinguish `passed`, `seal_verification_allowed`,
+`historical_reservation_status`, and `final_evaluation_allowed`.
+
+**Ubuntu seal verification**, only after the preflight passes and the operator
+explicitly approves payload access:
+
+```text
+ict integrity test-release-seal \
+  --root data/extracted \
+  --bundle outputs/group-split \
+  --preflight outputs/test-release-preflight/preflight.json \
+  --public-index <public-test-index-json-or-csv> \
+  --approve-seal-verification \
+  --out outputs/test-release-seal
+```
+
+The public index is sanitized metadata that provides the original Test sample
+IDs and public image, annotation and sensor hashes. Seal verification opens
+only the 1,472 Test payload paths listed by the pinned manifest and COCO Test
+index, verifies their hashes and reads their image/JSON/XLSX structure. It
+does not run model inference or calculate performance.
+
+The seal output is `outputs/test-release-seal/seal-verification.json`.
+Final Test evaluation is allowed only when preflight and seal both pass,
+historical reservation review is recorded separately, the exact 1,472-sample
+set and 0.5 threshold are frozen, and the two model checkpoints plus Detector
+initialization match their receipts. If reservation history is unverified,
+the holdout may remain usable for an internal same-source estimate, but the
+command must not claim independent or historical reservation clearance.
