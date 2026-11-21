@@ -128,7 +128,6 @@ def test_public_index_requires_all_raw_sha256_hashes(tmp_path: Path) -> None:
 
 
 def test_frozen_validation_uses_official_artifact_loader(tmp_path: Path) -> None:
-    cohort = None
     from ict_pipeline.evaluation.product_protocol import ValidationSample
     frozen = FrozenValidation(
         dataset_fingerprint="a" * 64, split_fingerprint="b" * 64,

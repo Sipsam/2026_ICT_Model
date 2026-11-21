@@ -29,7 +29,7 @@ from ict_pipeline.multimodal.preprocessing import PreprocessingConfig, fit_prepr
 from ict_pipeline.multimodal.training_plan import ProductTrainingConfig, plan_training as plan_product_training
 from ict_pipeline.pipeline.store import digest_json, fingerprint_path
 
-from test_multimodal import _sample
+from multimodal_fixtures import make_sample
 
 
 @pytest.mark.parametrize("finalize", [False, True], ids=["group-verification", "detector-finalization"])
@@ -41,7 +41,7 @@ def test_group_commands_keep_test_closed(
         pytest.importorskip("torchvision")
     source = tmp_path / "source"
     manifest = tmp_path / "provider.csv"
-    rows = [_sample(source, index, values=(index * 5, index * 5 + 1, index * 5 + 2))
+    rows = [make_sample(source, index, values=(index * 5, index * 5 + 1, index * 5 + 2))
             for index in range(1, 7)]
     for index, row in enumerate(rows, 1):
         color = tuple(255 if index & bit else 0 for bit in (1, 2, 4))

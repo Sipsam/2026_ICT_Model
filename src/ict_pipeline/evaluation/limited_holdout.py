@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -11,6 +10,7 @@ from tempfile import NamedTemporaryFile
 from typing import Any, Iterable, Literal
 
 from ..data.model import Progress
+from ..data.preprocessing.common import raw_file_sha256 as _sha
 from ..data.preprocessing.leakage import AnalysisConfig, analyze_leakage
 from ..data.preprocessing.policy import NAMES
 from ..data.preprocessing.revision import read_publication
@@ -34,14 +34,6 @@ LIMITATION_FIELDS: dict[str, Any] = {
     "production_session_independence_verified": False,
 }
 FIXED_TEST_COUNT = 1472
-
-
-def _sha(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _read_json(path: Path) -> dict:
@@ -241,7 +233,6 @@ def verify_test_payload_integrity(
     coco_ids = sorted(str(image["file_name"]).rsplit(".", 1)[0] for image in coco["images"])
     if coco_ids != sorted(test_ids):
         raise ValueError("COCO Test sample set differs from the fixed manifest.")
-    coco_images = {str(image["file_name"]).rsplit(".", 1)[0]: image for image in coco["images"]}
     coco_categories: dict[str, set[int]] = {sample_id: set() for sample_id in coco_ids}
     coco_boxes: dict[str, list[tuple[int, tuple[float, float, float, float]]]] = {
         sample_id: [] for sample_id in coco_ids

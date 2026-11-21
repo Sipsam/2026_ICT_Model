@@ -1,6 +1,7 @@
 """Shared file and row contracts for SMT preprocessing."""
 
 import csv
+import hashlib
 import json
 from collections.abc import Iterable, Mapping
 from pathlib import Path, PureWindowsPath
@@ -9,6 +10,12 @@ from ...pipeline.store import digest_json
 
 Row = dict[str, str | int | bool]
 CsvRow = dict[str, str]
+
+
+def raw_file_sha256(path: Path) -> str:
+    """Hash file bytes without incorporating the file name or tree metadata."""
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def read_csv(path: Path) -> list[CsvRow]:

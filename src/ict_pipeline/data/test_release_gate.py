@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-from collections import Counter
 from pathlib import Path
 from typing import Iterable
 
 from ..data.preprocessing.common import read_csv
+from ..data.preprocessing.common import raw_file_sha256 as _raw_sha256
 from ..data.preprocessing.policy import NAMES, label_policy
 from ..data.preprocessing.revision import read_publication
 from ..evaluation.product import read_artifact
@@ -31,14 +30,6 @@ def _read_json(path: Path) -> dict:
     if not isinstance(value, dict):
         raise ValueError("Invalid JSON receipt or metadata.")
     return value
-
-
-def _raw_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _is_sha256(value: object) -> bool:

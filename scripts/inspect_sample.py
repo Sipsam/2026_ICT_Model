@@ -1,20 +1,55 @@
-"""Inspect one English-path SMT sample. From repository root: python scripts/inspect_sample.py"""
-from pathlib import Path
-import json
-from pprint import pprint
-import pandas as pd
+"""Preview an explicitly selected image, JSON annotation, and sensor workbook."""
 
-root = Path('data/extracted')
-stem = 'SD_DEF_CC_A_20250807-090340_00001'
-image = root / 'train_images_soldering_defect_cold_solder' / (stem + '.JPG')
-label = root / 'train_annotations_soldering_defect_cold_solder' / (stem + '.json')
-sensor = root / 'train_sensors_soldering_defect_cold_solder' / (stem + '.xlsx')
-print('File existence:', {'image': image.is_file(), 'json': label.is_file(), 'sensor': sensor.is_file()})
-with label.open(encoding='utf-8-sig') as f:
-    data = json.load(f)
-for key, values in data.items():
-    print(f'\n{key}: {len(values)}')
-    if values:
-        pprint(values[0])
-print('\nSensor XLSX:')
-print(pd.read_excel(sensor).head().to_string(index=False))
+import argparse
+import json
+from pathlib import Path
+from pprint import pprint
+
+
+def inspect_sample(image: Path, annotation: Path, sensor: Path) -> None:
+    from openpyxl import load_workbook
+
+    print(
+        "File existence:",
+        {
+            "image": image.is_file(),
+            "json": annotation.is_file(),
+            "sensor": sensor.is_file(),
+        },
+    )
+    with annotation.open(encoding="utf-8-sig") as stream:
+        document = json.load(stream)
+    if not isinstance(document, dict):
+        raise ValueError("The annotation must be a JSON object.")
+    for name, value in document.items():
+        print(f"\n{name}:")
+        if isinstance(value, list):
+            print(f"{len(value)} entries")
+            if value:
+                pprint(value[0])
+        else:
+            pprint(value)
+
+    print("\nSensor XLSX (header and first five rows):")
+    workbook = load_workbook(sensor, read_only=True, data_only=True)
+    try:
+        for row in workbook.active.iter_rows(max_row=6, values_only=True):
+            pprint(row)
+    finally:
+        workbook.close()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--image", type=Path, required=True)
+    parser.add_argument("--annotation", type=Path, required=True)
+    parser.add_argument("--sensor", type=Path, required=True)
+    args = parser.parse_args()
+    try:
+        inspect_sample(args.image, args.annotation, args.sensor)
+    except (ImportError, OSError, ValueError) as exc:
+        parser.error(str(exc))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,17 +1,14 @@
 import json
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from openpyxl import Workbook
-from PIL import Image
 from typer.testing import CliRunner
 
 from ict_pipeline import smoke
 from ict_pipeline.classification.sensors import SampleIssue
 from ict_pipeline.cli import app
-from ict_pipeline.data.preprocessing.audit import XLSX_FIELDS
 from ict_pipeline.data.preprocessing.common import CsvRow, write_csv, write_json
 from ict_pipeline.data.preprocessing.leakage import AnalysisConfig, analyze_leakage
 from ict_pipeline.data.preprocessing.policy import SENSOR_FIELDS, label_policy
@@ -29,54 +26,7 @@ from ict_pipeline.multimodal.preprocessing import (
 from ict_pipeline.pipeline.store import digest_json
 from ict_pipeline.streaming.contracts import SensorObservation
 
-START = datetime(2025, 8, 7, 9, 3, 40)
-
-
-def _workbook(path: Path, steps: list[dict]) -> None:
-    workbook = Workbook()
-    workbook.active.append(("timestamp", *XLSX_FIELDS))
-    for step in steps:
-        workbook.active.append((step["timestamp"], *(step[key] for key in SENSOR_FIELDS)))
-    workbook.save(path)
-    workbook.close()
-
-
-def _sample(
-    root: Path, index: int, *, split: str = "train", source: str = "A", capture: int | None = None,
-    values: tuple[float | None, ...] = (0, 4, 8), image: bool = True, workbook: bool = True,
-    session: str | None = None, normal: bool = False,
-) -> CsvRow:
-    instant = START + timedelta(minutes=index if capture is None else capture)
-    status = "normal" if normal else "defect"
-    stem = f"SD_{'NOR' if normal else 'DEF'}_CC_{source}_{instant:%Y%m%d-%H%M%S}_{index:05}"
-    row = {
-        "sample_id": stem, "split": split, "source_class": "CC", "manufacturer": source,
-        "decision": "candidate", "use_for_detection": "candidate",
-        **{f"{key}_path": f"{split}_{kind}_soldering_{status}_cold_solder/{stem}{ext}"
-           for key, kind, ext in (("annotation", "annotations", ".json"), ("image", "images", ".JPG"),
-                                  ("sensor", "sensors", ".xlsx"))},
-    }
-    for key in ("annotation_path", "image_path", "sensor_path"):
-        (root / row[key]).parent.mkdir(parents=True, exist_ok=True)
-    steps = [
-        {"timestamp": (instant + timedelta(seconds=time)).isoformat(sep=" "),
-         **dict(zip(SENSOR_FIELDS, (value, 70, 0, 0.01, 61), strict=True)),
-         "defect_detected": int(not normal)}
-        for time, value in enumerate(values)
-    ]
-    document = {
-        "images": [{"id": index, "file_name": stem + ".JPG", "width": 24, "height": 18}],
-        "annotations": [] if normal else [{"category_id": 23, "image_id": index, "bbox": [3, 4, 9, 8]}],
-        "sensor_data": [{"image_id": index + 600, "sensor_sequence": steps}],
-    }
-    if session is not None:
-        document["production_session_id"] = session
-    (root / row["annotation_path"]).write_text(json.dumps(document), encoding="utf-8")
-    if image:
-        Image.new("RGB", (24, 18), (index * 16 % 256, 20, 60)).save(root / row["image_path"])
-    if workbook:
-        _workbook(root / row["sensor_path"], steps)
-    return row
+from multimodal_fixtures import START, make_sample, write_workbook
 
 
 def _manifest(path: Path, *rows: CsvRow) -> Path:
@@ -86,7 +36,7 @@ def _manifest(path: Path, *rows: CsvRow) -> Path:
 
 def test_verified_pair_preserves_independent_ids_nullable_channels_and_legacy_interchange(tmp_path: Path) -> None:
     root = tmp_path / "source"
-    row = _sample(root, 1, values=(0, None, 4))
+    row = make_sample(root, 1, values=(0, None, 4))
     manifest = _manifest(tmp_path / "manifest.csv", row)
     cohort = audit_cohort(root, manifest)
     record = cohort.records[0]
@@ -121,7 +71,7 @@ def test_invalid_sensor_values_are_rejected(value: object) -> None:
 @pytest.mark.parametrize("problem", ["ambiguous", "non_increasing", "capture", "missingness", "values", "timestamps"])
 def test_invalid_relationship_retains_image_only(tmp_path: Path, problem: str) -> None:
     root = tmp_path / "source"
-    row = _sample(root, 1)
+    row = make_sample(root, 1)
     annotation = root / row["annotation_path"]
     document = json.loads(annotation.read_text())
     group = document["sensor_data"][0]
@@ -134,16 +84,16 @@ def test_invalid_relationship_retains_image_only(tmp_path: Path, problem: str) -
         sequence.pop(0)
     annotation.write_text(json.dumps(document), encoding="utf-8")
     if problem == "capture":
-        _workbook(root / row["sensor_path"], sequence)
+        write_workbook(root / row["sensor_path"], sequence)
     elif problem == "missingness":
         sequence[0]["temperature"] = None
-        _workbook(root / row["sensor_path"], sequence)
+        write_workbook(root / row["sensor_path"], sequence)
     elif problem == "values":
         sequence[0]["temperature"] = 999
-        _workbook(root / row["sensor_path"], sequence)
+        write_workbook(root / row["sensor_path"], sequence)
     elif problem == "timestamps":
         sequence[-1]["timestamp"] += ".5"
-        _workbook(root / row["sensor_path"], sequence)
+        write_workbook(root / row["sensor_path"], sequence)
     cohort = audit_cohort(root, _manifest(tmp_path / "manifest.csv", row))
     record = cohort.records[0]
     expected = {
@@ -159,8 +109,8 @@ def test_invalid_relationship_retains_image_only(tmp_path: Path, problem: str) -
 
 def test_shared_time_cannot_replace_relationship_or_cross_group(tmp_path: Path) -> None:
     root = tmp_path / "source"
-    first = _sample(root, 1, workbook=False)
-    second = _sample(root, 2, capture=1, source="B", split="validation")
+    first = make_sample(root, 1, workbook=False)
+    second = make_sample(root, 2, capture=1, source="B", split="validation")
     first["sensor_path"] = second["sensor_path"]
     cohort = audit_cohort(root, _manifest(tmp_path / "manifest.csv", first, second))
     assert cohort.records[0].sequence is None
@@ -177,10 +127,10 @@ def test_shared_time_cannot_replace_relationship_or_cross_group(tmp_path: Path) 
 
 def test_cross_split_groups_and_duplicate_ids_are_quarantined(tmp_path: Path) -> None:
     root = tmp_path / "source"
-    train = _sample(root, 1, session="lot-1")
-    validation = _sample(root, 2, split="validation", capture=1, session="lot-1")
-    duplicate = _sample(root, 1, split="validation", session="lot-2")
-    other = _sample(root, 4, split="validation", source="B", session="lot-1")
+    train = make_sample(root, 1, session="lot-1")
+    validation = make_sample(root, 2, split="validation", capture=1, session="lot-1")
+    duplicate = make_sample(root, 1, split="validation", session="lot-2")
+    other = make_sample(root, 4, split="validation", source="B", session="lot-1")
     cohort = audit_cohort(root, _manifest(tmp_path / "manifest.csv", validation, other, duplicate, train))
     assert tuple(record.quarantined for record in cohort.records) == (True, True, True, False)
     assert cohort.records[0].alignment == "ambiguous"
@@ -192,8 +142,8 @@ def test_cross_split_groups_and_duplicate_ids_are_quarantined(tmp_path: Path) ->
 
 def test_frozen_train_preprocessing_and_masks(tmp_path: Path) -> None:
     root = tmp_path / "source"
-    train = _sample(root, 1, values=(0, None, 4))
-    validation = _sample(root, 2, split="validation", values=(900, 1000, 1100))
+    train = make_sample(root, 1, values=(0, None, 4))
+    validation = make_sample(root, 2, split="validation", values=(900, 1000, 1100))
     cohort = audit_cohort(root, _manifest(tmp_path / "manifest.csv", validation, train))
     config = PreprocessingConfig(scaling="standard", missing="train_median", window_seconds=2)
     state = fit_preprocessor(cohort, config)
@@ -253,9 +203,9 @@ def test_feature_order_masks_and_short_or_constant_sequences() -> None:
 def test_dataset_views_and_deterministic_variable_length_batches(tmp_path: Path) -> None:
     root = tmp_path / "source"
     rows = (
-        _sample(root, 1), _sample(root, 2, values=(5,), normal=True),
-        _sample(root, 3, workbook=False), _sample(root, 4, image=False),
-        _sample(root, 5, split="validation"),
+        make_sample(root, 1), make_sample(root, 2, values=(5,), normal=True),
+        make_sample(root, 3, workbook=False), make_sample(root, 4, image=False),
+        make_sample(root, 5, split="validation"),
     )
     cohort = audit_cohort(root, _manifest(tmp_path / "manifest.csv", *rows))
     state = fit_preprocessor(cohort, PreprocessingConfig(window_seconds=3))
@@ -296,8 +246,8 @@ def test_product_model_accepts_real_dataset_views_on_synthetic_files(tmp_path: P
     from ict_pipeline.multimodal.model_config import ArchitectureConfig, SensorEncoderConfig
 
     root = tmp_path / "source"
-    rows = (_sample(root, 1, values=(None, 6)), _sample(root, 2, normal=True),
-            _sample(root, 3, split="validation"))
+    rows = (make_sample(root, 1, values=(None, 6)), make_sample(root, 2, normal=True),
+            make_sample(root, 3, split="validation"))
     cohort = audit_cohort(root, _manifest(tmp_path / "manifest.csv", *rows))
     state = fit_preprocessor(cohort, PreprocessingConfig(scaling="standard", missing="train_median"))
     config = ArchitectureConfig(preprocessing_fingerprint=state.fingerprint,
@@ -319,7 +269,7 @@ def test_product_model_accepts_real_dataset_views_on_synthetic_files(tmp_path: P
 
 def test_cli_audit_and_resumable_index(tmp_path: Path) -> None:
     root = tmp_path / "source"
-    rows = (_sample(root, 1), _sample(root, 2))
+    rows = (make_sample(root, 1), make_sample(root, 2))
     manifest = _manifest(tmp_path / "manifest.csv", *rows)
     checkpoint = tmp_path / "cache.sqlite"
 
@@ -347,7 +297,7 @@ def test_cli_audit_and_resumable_index(tmp_path: Path) -> None:
 def test_optional_cpu_tensor_shapes_and_dtypes(tmp_path: Path) -> None:
     torch = pytest.importorskip("torch")
     root = tmp_path / "source"
-    first, second = _sample(root, 1), _sample(root, 2, values=(2,))
+    first, second = make_sample(root, 1), make_sample(root, 2, values=(2,))
     cohort = audit_cohort(root, _manifest(tmp_path / "manifest.csv", first, second))
     state = fit_preprocessor(cohort, PreprocessingConfig(window_seconds=2))
     pairs = MultimodalDataset(cohort, root, "train", mode="paired", preprocessing=state)
@@ -364,7 +314,7 @@ def test_optional_cpu_tensor_shapes_and_dtypes(tmp_path: Path) -> None:
 
 def test_published_membership_and_source_fingerprints_cover_internal_test(tmp_path: Path) -> None:
     root = tmp_path / "source"
-    train, validation = _sample(root, 1), _sample(root, 2, split="validation")
+    train, validation = make_sample(root, 1), make_sample(root, 2, split="validation")
     source = audit_cohort(root, _manifest(tmp_path / "original.csv", train, validation))
     revised = [
         {**row, "original_split": row["split"], "split": split, "group_id": f"group-{split}"}
@@ -393,7 +343,7 @@ def test_smoke_revision_binds_selected_sources_for_multimodal_audit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "source"
-    rows = tuple(_sample(root, index, values=(float(index),)) for index in range(1, 5))
+    rows = tuple(make_sample(root, index, values=(float(index),)) for index in range(1, 5))
     manifest = _manifest(tmp_path / "original.csv", *rows)
     report = analyze_leakage(root, manifest, root, AnalysisConfig())
     analysis = tmp_path / "leakage.json"

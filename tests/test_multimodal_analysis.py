@@ -26,8 +26,8 @@ from ict_pipeline.multimodal.training_plan import (
 )
 from ict_pipeline.pipeline.store import digest_json, fingerprint_path
 
-from test_multimodal import _sample
-from test_product_training import profile  # noqa: F401
+from multimodal_fixtures import make_sample
+from product_training_fixtures import product_training_profile as product_training_profile
 
 
 def _run(profile: ProductTrainingConfig, folder: Path, role: analysis.ModelRole, epoch: int) -> Path:
@@ -269,7 +269,7 @@ def test_analysis_reports_split_mismatch(
 def group_analysis(tmp_path: Path) -> tuple[list[str], Path, Path, set[Path]]:
     source, bundle = tmp_path / "source", tmp_path / "bundle"
     manifest = tmp_path / "provider.csv"
-    rows = [_sample(source, i, normal=i % 2 == 0, values=(5 * i, 5 * i + 1, 5 * i + 2))
+    rows = [make_sample(source, i, normal=i % 2 == 0, values=(5 * i, 5 * i + 1, 5 * i + 2))
             for i in range(1, 7)]
     for i, row in enumerate(rows, 1):
         color = tuple(255 if i & bit else 0 for bit in (1, 2, 4))

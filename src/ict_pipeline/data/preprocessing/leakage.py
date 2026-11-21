@@ -16,6 +16,7 @@ from ...classification.sensors import SampleIssue, aligned_sequence, parse_times
 from ...pipeline.store import digest_json, fingerprint_path
 from ..model import Progress
 from .common import CsvRow, read_csv, safe_component
+from .common import raw_file_sha256 as file_sha
 from .leakage_cache import ObservationCache, open_observation_cache
 from .policy import CLASS_MAP, SENSOR_FIELDS, SPLIT_MAP, label_policy
 
@@ -135,11 +136,6 @@ def normalize_source_rows(
     if len(keys) != len(rows):
         raise ValueError("The manifest contains repeated source records.")
     return rows
-
-
-def file_sha(path: Path) -> str:
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def source_hashes(root: Path, row: CsvRow) -> dict[str, str]:

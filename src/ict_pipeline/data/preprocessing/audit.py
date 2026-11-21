@@ -1,6 +1,5 @@
 """Audit the extracted SMT dataset and write CSV and JSON reports."""
 
-import hashlib
 import json
 import math
 from collections import Counter, defaultdict
@@ -9,6 +8,7 @@ from pathlib import Path
 from ...pipeline.store import fingerprint_path
 from ..model import Progress
 from .common import Row, require_separate_output, split_fingerprint, write_csv, write_json
+from .common import raw_file_sha256 as sha256
 from .policy import CLASSES, SENSOR_FIELDS, SPLIT_MAP, TARGET_IDS, label_policy
 
 XLSX_FIELDS = ("temperature(°C)", "humidity(%)", "vibration(m/s²)", "acceleration(g)", "noise(dB)")
@@ -16,14 +16,6 @@ FATAL = {"json_parse_error", "missing_image", "missing_sensor", "invalid_filenam
 
 def issue(issues: list[Row], sample: str, split: str, kind: str, detail: str) -> None:
     issues.append({"sample": sample, "split": split, "issue": kind, "detail": str(detail)})
-
-
-def sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for block in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(block)
-    return h.hexdigest()
 
 
 def compare_sensor(path: Path, sequence: list[object], issues: list[Row], stem: str, split: str, tolerance: float) -> None:

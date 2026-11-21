@@ -25,14 +25,14 @@ from ict_pipeline.multimodal.dataset import Batch, MultimodalDataset
 from ict_pipeline.multimodal.model_config import ArchitectureConfig, image_preprocessing_fingerprint
 from ict_pipeline.multimodal.preprocessing import PreprocessingConfig, fit_preprocessor
 from ict_pipeline.pipeline.store import digest_json
-from test_multimodal import _sample
+from multimodal_fixtures import make_sample
 
 
 def _publish(tmp_path: Path, scenario: str) -> tuple[Path, Path, str, str]:
     root = tmp_path / "source"
-    train = _sample(root, 1, values=(20, 21, 22))
-    validation = _sample(root, 2, split="validation", values=(40, 41, 42))
-    test = _sample(
+    train = make_sample(root, 1, values=(20, 21, 22))
+    validation = make_sample(root, 2, split="validation", values=(40, 41, 42))
+    test = make_sample(
         root, 3, capture=1 if scenario == "metadata" else 3,
         values=(20, 21, 22) if scenario == "sensor-similarity" else (60, 61, 62),
     )
