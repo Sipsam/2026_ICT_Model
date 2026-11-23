@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  boxPercent, buildFilters, dailySeries, defaultDateRange, detectionRows, inspectionRecord, pageParams, productEvidence,
+  boxPercent, buildFilters, buildModelRequest, dailySeries, datetimeLocalToISO, defaultDateRange,
+  detectionRows, inspectionEndpoint, inspectionRecord, pageParams, productEvidence, selectDetectionRecord,
 } from "../src/ict_pipeline/api/dashboard/client.mjs";
 
 const dates = {from: "2026-10-30", through: "2026-11-02"};
@@ -115,4 +116,51 @@ test("record validation preserves versions and treats identifiers as opaque text
   assert.throws(() => inspectionRecord({...record, inspection_id: "../private"}), /invalid or unsupported/);
   assert.throws(() => inspectionRecord({...record, result: {...record.result, schema_version: 2}}), /invalid or unsupported/);
   assert.throws(() => inspectionRecord({...record, result: {...record.result, detections: {}}}), /invalid or unsupported/);
+});
+
+test("inspection request payloads vary by model input kind", () => {
+  const id = "00000000-0000-4000-8000-000000000002";
+  const detector = buildModelRequest("faster-rcnn-final", {input_kind: null}, {id});
+  assert.deepEqual(detector, {
+    schema_version: 1,
+    model_id: "faster-rcnn-final",
+    request_id: "dashboard-" + id,
+    source_id: "dashboard-camera",
+  });
+  const image = buildModelRequest("fpn-image-only", {input_kind: "multimodal"}, {id});
+  assert.equal(image.schema_version, 1);
+  assert.equal(image.sample_id, "dashboard-" + id);
+  const sensorEvidence = {
+    capture_timestamp: "2026-11-23T12:26:00.000Z",
+    sensor_evidence: {source_id: "dashboard-sensor", sequence: {channels: ["temperature"], units: ["°C"], steps: []}},
+  };
+  const sensor = buildModelRequest("fpn-sensor-concat", {input_kind: "multimodal"}, {id, sensor: sensorEvidence});
+  assert.equal(sensor.sample_id, "dashboard-" + id);
+  assert.equal(sensor.capture_timestamp, sensorEvidence.capture_timestamp);
+  assert.deepEqual(sensor.sensor_evidence, sensorEvidence.sensor_evidence);
+  assert.equal("sensor_evidence" in detector, false);
+  assert.equal(inspectionEndpoint({input_kind: null}), "/v1/inspections");
+  assert.equal(inspectionEndpoint({input_kind: "multimodal"}), "/v1/inspections/multimodal");
+});
+
+test("comparison selects the actual detector record and preserves zero detections", () => {
+  const imageResult = {image: {width: 40, height: 80}, detections: [], multimodal: {schema_version: 1}};
+  const detectorResult = {image: {width: 40, height: 80}, detections: []};
+  const records = [{model_id: "fpn-image-only", result: imageResult},
+                   {model_id: "faster-rcnn-final", result: detectorResult}];
+  assert.equal(selectDetectionRecord(records)?.model_id, "faster-rcnn-final");
+  assert.equal(selectDetectionRecord(records).result.detections.length, 0);
+  assert.equal(selectDetectionRecord([{model_id: "fpn-image-only", result: imageResult}]), null);
+  assert.equal(selectDetectionRecord([]), null);
+});
+
+test("datetime-local values convert to valid UTC ISO timestamps and reject invalid values", () => {
+  const iso = datetimeLocalToISO("2026-11-23T21:26");
+  assert.match(iso, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00\.000Z$/);
+  const expected = new Date(2026, 10, 23, 21, 26).toISOString();
+  assert.equal(iso, expected);
+  assert.equal(datetimeLocalToISO("2026-11-23T21:26:30.123"), new Date(2026, 10, 23, 21, 26, 30, 123).toISOString());
+  assert.throws(() => datetimeLocalToISO("2026-02-30T12:00"), /valid local/);
+  assert.throws(() => datetimeLocalToISO("not-a-date"), /valid local/);
+  assert.throws(() => datetimeLocalToISO("2026-11-23T24:00"), /valid local/);
 });

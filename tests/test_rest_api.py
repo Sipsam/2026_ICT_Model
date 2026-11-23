@@ -185,6 +185,13 @@ def test_sqlite_history_filters_real_records_and_hides_corruption(settings: APIS
         assert_error(client.get(f"{SINGLE}/{record.inspection_id}"), 503, "storage_unavailable")
 
 
+def test_general_inspection_rejects_multimodal_only_fields(settings: APISettings) -> None:
+    with client_for(create_app(settings)) as client:
+        response = single(client, sample_id="dashboard-sample", capture_timestamp="2026-11-23T12:26:00Z")
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "invalid_request"
+
+
 def test_mock_result_persists_and_openapi_uses_shared_schema(settings: APISettings) -> None:
     app = create_app(settings)
     assert not settings.storage_root.exists()

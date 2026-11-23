@@ -163,6 +163,61 @@ export function productEvidence(product) {
   };
 }
 
+export function datetimeLocalToISO(value) {
+  if (typeof value !== "string") throw new Error("Choose a valid local capture date and time.");
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/.exec(value);
+  if (!match) throw new Error("Choose a valid local capture date and time.");
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, millisecondText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText ?? "0");
+  const millisecond = Number((millisecondText ?? "").padEnd(3, "0") || "0");
+  const date = new Date(year, month - 1, day, hour, minute, second, millisecond);
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day
+      || date.getHours() !== hour || date.getMinutes() !== minute || date.getSeconds() !== second
+      || date.getMilliseconds() !== millisecond) {
+    throw new Error("Choose a valid local capture date and time.");
+  }
+  return date.toISOString();
+}
+
+export function buildModelRequest(modelId, model, {id, sensor} = {}) {
+  requirePayload(typeof modelId === "string" && modelId.length > 0);
+  const requestId = "dashboard-" + (id ?? crypto.randomUUID());
+  const details = {
+    schema_version: 1,
+    model_id: modelId,
+    request_id: requestId,
+    source_id: "dashboard-camera",
+  };
+  const isMultimodal = model?.input_kind === "multimodal"
+    || modelId === "fpn-image-only"
+    || modelId === "fpn-sensor-concat";
+  if (isMultimodal) {
+    details.sample_id = "dashboard-" + (id ?? crypto.randomUUID());
+  }
+  if ((model?.input_kind === "multimodal" || modelId === "fpn-sensor-concat") && modelId === "fpn-sensor-concat" && sensor) {
+    Object.assign(details, sensor);
+  }
+  return details;
+}
+
+export function inspectionEndpoint(model) {
+  return model?.input_kind === "multimodal" ? "/v1/inspections/multimodal" : "/v1/inspections";
+}
+
+export function selectDetectionRecord(records) {
+  if (!Array.isArray(records)) return null;
+  return records.find(row => row?.model_id === "faster-rcnn-final" && row?.result?.image
+      && Array.isArray(row.result.detections))
+    ?? records.find(row => row?.result?.image && Array.isArray(row.result.detections)
+      && !row?.result?.multimodal)
+    ?? null;
+}
+
 export function imageSize(image) {
   return isCount(image?.width) && isCount(image?.height) && image.width > 0 && image.height > 0;
 }

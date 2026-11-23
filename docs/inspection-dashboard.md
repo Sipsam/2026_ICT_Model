@@ -35,6 +35,14 @@ PairingReceipt and capture-time sensor policy. Missing or mismatched evidence
 returns the existing API validation error. The UI does not bypass pairing or
 present unverified fusion as a paired result.
 
+The dashboard sends `schema_version`, `model_id`, `request_id`, and `source_id`
+on every inspection. It adds `sample_id` only to multimodal FPN requests;
+Faster R-CNN requests use the ordinary `/v1/inspections` endpoint and do not
+include multimodal fields. Browser `datetime-local` values are interpreted in
+the browser's local timezone and converted with `Date`/`toISOString()` before
+upload. Invalid or nonexistent local times are rejected instead of being
+appended with an ambiguous `Z` suffix.
+
 **Run available models and compare** submits the available finalized detector
 and FPN arms sequentially. Sensor Concat is included only when sensor evidence
 is complete. A failed model does not hide successful comparison results.

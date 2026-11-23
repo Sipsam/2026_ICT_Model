@@ -1,7 +1,7 @@
 import {
   APIError, CLASSES, STATUSES, api, buildFilters, dailySeries, defaultDateRange,
-  detectionRows, imageSize, inspectionRecord, isCount, json, pageParams, productEvidence, requirePayload,
-  inspectMultipart,
+  buildModelRequest, datetimeLocalToISO, detectionRows, imageSize, inspectionRecord, isCount, json,
+  inspectionEndpoint, pageParams, productEvidence, requirePayload, inspectMultipart, selectDetectionRecord,
 } from "./client.mjs";
 
 const byId = id => document.getElementById(id);
@@ -612,13 +612,19 @@ function sensorPayload() {
   const units = ["°C", "%", "m/s²", "g", "dB"];
   const values = channelIds.map(name => {
     const value = byId("sensor-" + name).value;
-    return value === "" ? null : Number(value);
+    if (value === "") return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
   });
   const timestamp = byId("capture-time").value;
   const hasValues = values.some(value => value !== null);
   if (!timestamp || !hasValues) return null;
-  if (!Number.isFinite(Date.parse(timestamp))) return null;
-  const captureTimestamp = timestamp.length === 16 ? timestamp + ":00Z" : timestamp + "Z";
+  let captureTimestamp;
+  try {
+    captureTimestamp = datetimeLocalToISO(timestamp);
+  } catch {
+    return null;
+  }
   return {
     capture_timestamp: captureTimestamp,
     sensor_evidence: {
@@ -634,18 +640,11 @@ function sensorPayload() {
 
 function modelRequestDetails(modelId) {
   const id = crypto.randomUUID();
-  const details = {
-    model_id: modelId,
-    request_id: "dashboard-" + id,
-    source_id: "dashboard-camera",
-    sample_id: "dashboard-" + id,
-  };
   const model = state.models.find(row => row.model_id === modelId);
-  if (model?.input_kind === "multimodal" && modelId === "fpn-sensor-concat") {
-    const sensor = sensorPayload();
-    if (sensor) Object.assign(details, sensor);
-  }
-  return details;
+  const sensor = (model?.input_kind === "multimodal" || modelId === "fpn-sensor-concat")
+    && modelId === "fpn-sensor-concat"
+    ? sensorPayload() : null;
+  return buildModelRequest(modelId, model, {id, sensor});
 }
 
 function renderProductScores(container, product) {
@@ -710,7 +709,7 @@ function renderWorkspaceResult(records) {
 
 function renderWorkspaceBoxes(media) {
   if (!activeWorkspaceImage?.complete || !state.previewURL) return;
-  const record = state.comparisonRecords.find(row => row.result.image);
+  const record = selectDetectionRecord(state.comparisonRecords);
   if (!record) {
     media.replaceChildren(element("p", "No original-image result was returned.", "notice"));
     return;
@@ -776,8 +775,7 @@ async function runInspection() {
   for (const model of targets) {
     const details = modelRequestDetails(model.model_id);
     try {
-      const record = await inspectMultipart(model.input_kind === "multimodal"
-        ? "/v1/inspections/multimodal" : "/v1/inspections", {
+      const record = await inspectMultipart(inspectionEndpoint(model), {
         file: state.selectedFile, details, token: state.token,
       });
       records.push(inspectionRecord(record));
@@ -831,7 +829,7 @@ byId("box-visibility").addEventListener("change", () => renderWorkspaceBoxes(byI
 byId("class-filter").addEventListener("change", () => renderWorkspaceBoxes(byId("result-content").querySelector(".result-grid > div")));
 byId("save-result").addEventListener("click", () => {
   if (!activeWorkspaceImage?.complete) return;
-  const record = state.comparisonRecords.find(row => row.result.image);
+  const record = selectDetectionRecord(state.comparisonRecords);
   if (!record) return;
   const image = record.result.image;
   const canvas = document.createElement("canvas");

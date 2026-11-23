@@ -142,7 +142,9 @@ def test_image_endpoint_requires_exact_staged_bytes(
         path = submission.headers["Location"] + "/image"
         source = submission.json()["result"]["image"]
         staged = root / (source["sha256"] + suffix)
-        assert_error(client.get(path), 404, "inspection_image_unavailable")
+        assert staged.read_bytes() == data
+        response = client.get(path)
+        assert response.status_code == 200 and response.content == data
         staged.write_bytes(image_bytes(format, (10, 10)))
         assert_error(client.get(path), 404, "inspection_image_unavailable")
         staged.write_bytes(data)
