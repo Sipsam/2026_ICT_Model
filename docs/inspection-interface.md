@@ -14,6 +14,13 @@ In single-image mode both identifiers default to the image filename. Mock mode n
 
 Real inference uses the existing local detector dependencies and the same predictors as evaluation. Pass a completed model directory containing its `run.json` and selected `best` or `last` checkpoint. `--trust-run` attests that you trust the entire run and is required because native YOLO checkpoint deserialization can execute code. Inspection checks the completed run, canonical label policy, checkpoint format, recorded path and fingerprint. It verifies a private copy before invoking the adapter. An optional `--expected-fingerprint` pins the ICT fingerprint obtained through an independent trusted channel. These fingerprints use the ICT file fingerprint algorithm and differ from the raw file SHA-256 shown by tools such as `Get-FileHash`.
 
+An independent finalized Faster R-CNN directory is supported by the REST
+model configuration with `"mode": "finalized"`. It requires
+`finalization.json` and `best.pt`; its receipt fingerprint and checkpoint
+SHA-256 must agree. The loader also verifies the MobileNetV3 Large FPN
+architecture, tensor layout, finite weights, image size and configured layout.
+The existing real-prediction and bounding-box contract is unchanged.
+
 CPU and FP32 are the defaults. Use `--device cuda`, `rocm`, or `mps` with a compatible installed backend and device. Real inference uses the saved training image size by default. `--image-size` overrides it with a multiple of 32 subject to model limits. `--confidence` defaults to 0.25 and keeps scores at or above the threshold. `--nms-iou` defaults to 0.7 and suppresses overlapping boxes of the same class when IoU exceeds the threshold. YOLO and Faster R-CNN also use their native NMS. RT-DETR uses its existing query selection followed by inspection NMS.
 
 ## Batch requests

@@ -134,6 +134,7 @@ class ModelProvenance(Contract):
     checkpoint_kind: CheckpointKind | None = None
     checkpoint_fingerprint: Fingerprint | None = None
     run_metadata_fingerprint: Fingerprint | None = None
+    finalization_fingerprint: Fingerprint | None = None
     device: str | None = None
     image_size: int | None = Field(default=None, ge=64, multiple_of=32)
     libraries: dict[str, str] = Field(default_factory=dict)

@@ -256,6 +256,54 @@ class InspectionService:
             raise InspectionError("Cannot initialize inspection. Check run metadata, checkpoint, runtime and options.") from None
         return cls(predictor, provenance, thresholds, credentials)
 
+    @classmethod
+    def from_finalized(
+        cls, directory: Path, *, trust_finalization: bool,
+        thresholds: InspectionThresholds = InspectionThresholds(),
+        device: Device = "cpu", credentials: Credentials | None = None,
+        factory: PredictorFactory | None = None,
+        expected_model: ModelName | None = None, scratch_root: Path | None = None,
+    ) -> "InspectionService":
+        if trust_finalization is not True:
+            raise InspectionError("Confirm the finalized detector directory comes from a trusted source.")
+        credentials = credentials or Credentials()
+        try:
+            directory = local_path(directory, Path.cwd(), credentials)
+            from ..data.detector_finalization import inspect_finalized_detector
+            inspected = inspect_finalized_detector(directory, credentials)
+            if expected_model is not None and inspected["name"] != expected_model:
+                raise InspectionError("Finalized checkpoint model differs from the configured model.")
+            config = EvaluationConfig(
+                image_size=inspected["image_size"], score_floor=min(thresholds.confidence, 0.999),
+                confidence=thresholds.confidence, nms_iou=thresholds.nms_iou, warmup=0, device=device,
+            )
+            with TemporaryDirectory(prefix="ict-inspect-finalized-", dir=scratch_root) as temp:
+                scratch = Path(temp)
+                snapshot = scratch / "best.pt"
+                copyfile(inspected["path"], snapshot)
+                if (fingerprint_path(snapshot) != inspected["fingerprint"]
+                        or fingerprint_path(directory / "finalization.json") != inspected["receipt_fingerprint"]):
+                    raise InspectionError("The finalized model changed while preparing the checkpoint.")
+                with _BACKEND_LOCK:
+                    predictor = (factory or load_predictor)(
+                        inspected["name"], snapshot, inspected["training"], config, scratch,
+                    )
+            provenance = ModelProvenance(
+                mode="real", model=inspected["name"], checkpoint_kind="best",
+                checkpoint_fingerprint=inspected["fingerprint"],
+                run_metadata_fingerprint=inspected["metadata_fingerprint"],
+                finalization_fingerprint=inspected["metadata_fingerprint"],
+                device=predictor.device, image_size=config.image_size,
+                libraries=cast(dict[str, str], credentials.redact(predictor.libraries)),
+            )
+        except InspectionError:
+            raise
+        except (EvaluationError, SetupError, ValueError) as exc:
+            raise InspectionError(credentials.redact_text(str(exc))) from None
+        except (OSError, RuntimeError, AttributeError, TypeError):
+            raise InspectionError("Cannot initialize finalized inspection. Check finalization metadata, checkpoint, runtime and options.") from None
+        return cls(predictor, provenance, thresholds, credentials)
+
     def _context(self, request: InspectionInput | None, input_line: int | None) -> dict[str, object]:
         context: dict[str, object] = {
             "provenance": self.provenance, "thresholds": self.thresholds, "input_line": input_line,

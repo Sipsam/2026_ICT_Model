@@ -20,7 +20,7 @@ from ..multimodal.inference_contracts import MockProductModel, ProductInspection
 from .errors import APIError
 from .repository import InspectionRepository
 from .schemas import AvailableModel, BatchItem, Health, StoredInspection
-from .settings import APISettings, MockModel, ProductModel, TrustedModel
+from .settings import APISettings, FinalizedModel, MockModel, ProductModel, TrustedModel
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +35,14 @@ class ModelManager:
         for model_id, spec in settings.models.items():
             product = isinstance(spec, ProductModel)
             detector_model = None
-            mode: Literal["real", "mock"] = "real"
+            mode: Literal["real", "mock", "finalized"] = "real"
             mock_scenario = None
             if isinstance(spec, MockModel):
                 mode, mock_scenario = "mock", spec.scenario
             elif isinstance(spec, TrustedModel):
                 detector_model = spec.model
+            elif isinstance(spec, FinalizedModel):
+                mode, detector_model = "finalized", spec.model
             elif isinstance(spec.product, MockProductModel):
                 mode, mock_scenario = "mock", "empty"
             elif spec.detector is not None:
@@ -68,10 +70,21 @@ class ModelManager:
 
     @staticmethod
     def _load_detector(
-        root: Path, spec: TrustedModel, scratch: Path, credentials: Credentials, factory: PredictorFactory | None,
+        root: Path, spec: TrustedModel | FinalizedModel, scratch: Path, credentials: Credentials,
+        factory: PredictorFactory | None,
     ) -> InspectionService:
         run = (root / spec.run).resolve()
-        if not run.is_relative_to(root) or not (run / "run.json").resolve().is_relative_to(run):
+        if not run.is_relative_to(root):
+            raise ValueError("Invalid model run location.")
+        if isinstance(spec, FinalizedModel):
+            if not (run / "finalization.json").resolve().is_relative_to(run):
+                raise ValueError("Invalid finalized model location.")
+            return InspectionService.from_finalized(
+                run, trust_finalization=spec.trust_finalization, expected_model=spec.model,
+                device=spec.device, thresholds=spec.thresholds, scratch_root=scratch,
+                credentials=credentials, factory=factory,
+            )
+        if not (run / "run.json").resolve().is_relative_to(run):
             raise ValueError("Invalid model run location.")
         return InspectionService.from_run(
             run, trust_run=spec.trust_run, expected_model=spec.model, checkpoint_kind=spec.checkpoint,

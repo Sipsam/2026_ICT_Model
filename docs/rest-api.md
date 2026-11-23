@@ -13,6 +13,45 @@ The launcher binds to `127.0.0.1:8000` and starts one worker. It serves the inte
 
 The [inspection dashboard](inspection-dashboard.md) is available at `http://127.0.0.1:8000/dashboard` on a loopback bind. It reads the same history and statistics API as other clients.
 
+## Registering a finalized Faster R-CNN
+
+The API also accepts a detector produced by `ict integrity finalize-detector`.
+Use a relative path below `model_root`; never send a local checkpoint path in an
+HTTP request. The finalized directory must contain `best.pt` and
+`finalization.json`.
+
+```json
+{
+  "host": "127.0.0.1",
+  "port": 8000,
+  "model_root": "D:/artifacts/ict-results",
+  "models": {
+    "faster-rcnn-final": {
+      "mode": "finalized",
+      "model": "faster_rcnn",
+      "run": "group-retraining/2553967b4400a43f9f60653c9550f86c48cdb1d983c50c8c506ce48be4f24b55/finalized-detector/1b1792bf7b1445ff88b8272b2bfa743e",
+      "checkpoint": "best",
+      "device": "cpu",
+      "trust_finalization": true
+    }
+  }
+}
+```
+
+Set `ICT_API_CONFIG` to this JSON file before startup. The server verifies the
+receipt fingerprint, canonical finalization status, Faster R-CNN architecture,
+layout, image size, recorded best epoch and losses, and the raw `best.pt`
+SHA-256 before loading. An invalid or changed checkpoint keeps the public model
+ID unavailable. This mode does not create or modify `run.json`.
+
+PowerShell:
+
+```powershell
+$env:ICT_API_CONFIG = 'C:\approved\ict-api-models.json'
+python -m ict_pipeline.api
+Invoke-RestMethod -Uri 'http://127.0.0.1:8000/v1/models'
+```
+
 ## Routes
 
 | Method and path | Successful response |

@@ -11,6 +11,8 @@ from typer.testing import CliRunner
 from ict_pipeline.cli import app
 from ict_pipeline.config.settings import Credentials
 from ict_pipeline.data.preprocessing.policy import label_policy
+from ict_pipeline.data import detector_finalization
+from ict_pipeline.pipeline.store import digest_json
 from ict_pipeline.evaluation.contracts import EvaluationConfig, Prediction, Preprocessing, normalize_prediction
 from ict_pipeline.inspection import records, service as implementation
 from ict_pipeline.inspection.contracts import (
@@ -51,6 +53,88 @@ def make_run(root: Path, model: ModelName) -> tuple[Path, Path]:
         }},
     }), encoding="utf-8")
     return run, checkpoint
+
+
+def make_finalized(root: Path) -> tuple[Path, Path]:
+    import torch
+    from ict_pipeline.multimodal.fpn import build_detector
+    from ict_pipeline.multimodal.model_config import FPNDetectorConfig
+
+    directory = root / "finalized-detector" / "fixture"
+    directory.mkdir(parents=True)
+    weights = build_detector(FPNDetectorConfig(image_size=64, layout="scratch")).state_dict()
+    best_loss = 0.25
+    state = {
+        "format": detector_finalization.BACKEND.checkpoint_format,
+        "architecture": detector_finalization.ARCHITECTURE,
+        "epoch": 16,
+        "best_epoch": 16,
+        "best_loss": best_loss,
+        "val_loss": best_loss,
+        "model": weights,
+        "optimizer": {},
+        "scaler": {},
+    }
+    checkpoint = directory / "best.pt"
+    torch.save(state, checkpoint)
+    sha256 = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    record = {
+        "schema_version": 1,
+        "status": detector_finalization.STATUS,
+        "model": ModelName.FASTER_RCNN,
+        "architecture": detector_finalization.ARCHITECTURE,
+        "reason": detector_finalization.REASON,
+        "source": {
+            "run_id": "fixture",
+            "run_fingerprint": "a" * 64,
+            "run_json_sha256": "b" * 64,
+            "status": "failed",
+            "error": detector_finalization.FAILURE,
+        },
+        "planned_epochs": 50,
+        "completed_epoch": 46,
+        "best_epoch": 16,
+        "best_val_loss": best_loss,
+        "checkpoints": {
+            "best": {
+                "path": "best.pt",
+                "fingerprint": fingerprint_path(checkpoint),
+                "sha256": sha256,
+                "epoch": 16,
+                "best_epoch": 16,
+                "best_loss": best_loss,
+                "val_loss": best_loss,
+            },
+            "last": {
+                "path": "last.pt",
+                "fingerprint": "c" * 64,
+                "sha256": "d" * 64,
+                "epoch": 46,
+                "best_epoch": 16,
+                "best_loss": best_loss,
+                "val_loss": 0.30,
+            },
+        },
+        "dataset_revision": {},
+        "publication_fingerprint": "e" * 64,
+        "cohort_fingerprint": "f" * 64,
+        "split_fingerprint": "1" * 64,
+        "detector_layout": "scratch",
+        "image_size": 64,
+        "checks": {
+            "group_inputs": "passed",
+            "checkpoint_fingerprints": "passed",
+            "checkpoint_epochs_and_losses": "passed",
+            "best_model_layout_and_finiteness": "passed",
+            "validation_inference": {"status": "not_run", "split": "val"},
+            "test_payloads_opened": False,
+        },
+    }
+    (directory / "finalization.json").write_text(json.dumps({
+        "finalization": record,
+        "fingerprint": digest_json(record),
+    }), encoding="utf-8")
+    return directory, checkpoint
 
 
 class AdapterFixture:
@@ -114,6 +198,46 @@ def test_real_factory_loads_once_and_reuses_class_mapping(tmp_path: Path, image:
     assert result.detections[0].bbox_xyxy == (0, 4, 80, 40)
     assert result.image is not None and result.image.sha256 == hashlib.sha256(image.read_bytes()).hexdigest()
     assert InspectionResult.model_validate_json(result.model_dump_json()) == result
+
+
+def test_finalized_detector_loads_once_and_rejects_bad_sha(tmp_path: Path, image: Path) -> None:
+    directory, checkpoint = make_finalized(tmp_path)
+    predictor = AdapterFixture(ModelName.FASTER_RCNN)
+    loads: list[Path] = []
+
+    def factory(name: ModelName, local: Path, train: TrainConfig, config: EvaluationConfig, scratch: Path) -> AdapterFixture:
+        assert name == ModelName.FASTER_RCNN and local.read_bytes() == checkpoint.read_bytes()
+        assert train.image_size == config.image_size == 64
+        loads.append(local)
+        return predictor
+
+    service = InspectionService.from_finalized(
+        directory, trust_finalization=True, factory=factory,
+    )
+    result = service.inspect(request_for(image))
+    assert service.inspect(request_for(image)) == result
+    assert len(loads) == 1 and predictor.calls == 2
+    assert result.provenance.model == ModelName.FASTER_RCNN
+    assert result.provenance.checkpoint_kind == "best"
+    assert result.provenance.finalization_fingerprint is not None
+
+    receipt = directory / "finalization.json"
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    payload["finalization"]["checkpoints"]["best"]["sha256"] = "0" * 64
+    receipt.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(InspectionError):
+        InspectionService.from_finalized(directory, trust_finalization=True, factory=factory)
+
+
+@pytest.mark.parametrize("missing", ("receipt", "checkpoint"))
+def test_finalized_detector_missing_artifact_is_rejected(tmp_path: Path, missing: str) -> None:
+    directory, checkpoint = make_finalized(tmp_path)
+    (directory / "finalization.json").unlink() if missing == "receipt" else checkpoint.unlink()
+    with pytest.raises(InspectionError):
+        InspectionService.from_finalized(
+            directory, trust_finalization=True,
+            factory=lambda *_: pytest.fail("Rejected finalized artifact must not load."),
+        )
 
 
 def test_empty_real_prediction_requires_review(tmp_path: Path, image: Path) -> None:

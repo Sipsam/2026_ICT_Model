@@ -249,3 +249,74 @@ def verify_finalized_detector(
     except (KeyError, OSError, TypeError, ValueError):
         raise ValueError("Invalid finalized Detector receipt, checkpoint or group provenance.") from None
     return payload["fingerprint"]
+
+
+def inspect_finalized_detector(directory: Path, credentials: Credentials) -> dict[str, Any]:
+    """Inspect a finalized Detector receipt and checkpoint without relying on run.json."""
+    try:
+        _reject_link(directory)
+        receipt = directory / RECEIPT
+        best = directory / "best.pt"
+        _reject_link(receipt)
+        _reject_link(best)
+        if not directory.is_dir() or not receipt.is_file() or not best.is_file():
+            raise ValueError("Missing finalized Detector receipt or best checkpoint.")
+        if not receipt.resolve().is_relative_to(directory.resolve()) or not best.resolve().is_relative_to(directory.resolve()):
+            raise ValueError("Finalized Detector receipt or checkpoint is outside the model directory.")
+
+        payload = json.loads(receipt.read_bytes())
+        record = payload["finalization"]
+        checkpoint = record["checkpoints"]["best"]
+        last = record["checkpoints"]["last"]
+        checks = record["checks"]
+        content = best.read_bytes()
+        sha256 = _sha256(content)
+        file_fingerprint = fingerprint_path(best)
+        if (
+            payload["fingerprint"] != digest_json(record) or record["schema_version"] != 1
+            or record["status"] != STATUS or record["model"] != ModelName.FASTER_RCNN
+            or record["architecture"] != ARCHITECTURE or record["reason"] != REASON
+            or record["source"]["status"] != "failed" or record["source"]["error"] != FAILURE
+            or not all(_is_sha256(record["source"][key]) for key in ("run_fingerprint", "run_json_sha256"))
+            or checkpoint["path"] != "best.pt" or checkpoint["sha256"] != sha256
+            or checkpoint["fingerprint"] != _file_fingerprint(sha256)
+            or checkpoint["fingerprint"] != file_fingerprint
+            or not 1 <= record["best_epoch"] <= record["completed_epoch"] < record["planned_epochs"]
+            or checkpoint["epoch"] != record["best_epoch"] or last["epoch"] != record["completed_epoch"]
+            or checkpoint["best_epoch"] != record["best_epoch"] or last["best_epoch"] != record["best_epoch"]
+            or not _loss(record["best_val_loss"]) or checkpoint["val_loss"] != record["best_val_loss"]
+            or checkpoint["best_loss"] != record["best_val_loss"] or last["best_loss"] != record["best_val_loss"]
+            or any(checks[key] != "passed" for key in ("group_inputs", "checkpoint_fingerprints",
+                     "checkpoint_epochs_and_losses", "best_model_layout_and_finiteness"))
+            or checks["test_payloads_opened"] is not False
+        ):
+            raise ValueError("Invalid finalized Detector receipt or checkpoint provenance.")
+
+        state = _checkpoint(content, "best.pt", record["best_epoch"])
+        layout = FPNDetectorConfig(image_size=record["image_size"], layout=record["detector_layout"])
+        try:
+            from ..multimodal.fpn import detector_from_checkpoint
+            detector_from_checkpoint(state, layout)
+        except (ImportError, RuntimeError, OSError):
+            raise ValueError("Cannot construct the finalized Faster R-CNN checkpoint.") from None
+        if _sha256(best.read_bytes()) != sha256 or fingerprint_path(best) != file_fingerprint:
+            raise ValueError("Finalized Detector checkpoint changed during verification.")
+
+        training = TrainConfig(image_size=layout.image_size, initialization=layout.layout)
+        credentials.protect_path(str(receipt.resolve()), "finalization receipt")
+        credentials.protect_path(str(best.resolve()), "finalized checkpoint")
+        return {
+            "name": ModelName.FASTER_RCNN,
+            "path": best,
+            "sha256": sha256,
+            "fingerprint": file_fingerprint,
+            "receipt_fingerprint": fingerprint_path(receipt),
+            "metadata_fingerprint": payload["fingerprint"],
+            "training": training,
+            "image_size": layout.image_size,
+            "layout": layout.layout,
+        }
+    except FileNotFoundError:
+        raise ValueError("Finalized Detector metadata or checkpoint is missing.") from None
+    except (KeyError, json.JSONDecodeError, OSError, TypeError, ValueError):
+        raise ValueError("Invalid finalized Detector receipt, checkpoint or metadata.") from None

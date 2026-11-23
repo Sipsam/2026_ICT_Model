@@ -18,7 +18,7 @@ class AvailableModel(Contract):
     model_config = ConfigDict(json_schema_mode_override="validation")
 
     model_id: ModelID
-    mode: Literal["mock", "real"]
+    mode: Literal["mock", "real", "finalized"]
     model: ModelName | None = None
     mock_scenario: MockScenario | None = None
     available: bool

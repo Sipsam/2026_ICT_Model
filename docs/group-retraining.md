@@ -2,6 +2,15 @@
 
 Use the existing published full split bundle and the matching sanitized product index on Ubuntu. The previous profiles name `~/ict-results/smt-aihub-split-v1` and `~/ict-results/smt-aihub-sensor-index-v1`. Confirm the actual server paths and pin the expected identifiers from the publication record and cohort receipt. The local 36-image smoke revision and the historical full split preview are compatibility and planning artifacts, respectively.
 
+## Serve an already finalized detector
+
+After `ict integrity finalize-detector` publishes a directory containing
+`best.pt` and `finalization.json`, an inspection server can register that
+directory with the REST `"mode": "finalized"` configuration. The server checks
+the receipt fingerprint, raw checkpoint SHA-256, record fingerprint, architecture,
+layout, image size, epoch/loss values and tensor compatibility. It does not
+reinterpret a failed source run as completed and does not create `run.json`.
+
 The local custody review at `outputs/dataset-release-review-custody/release-candidate.json` marks the source-day proposal `5f6aabd00368128e87cfd1e4abb0b019efa326a4ef08d4312c34220153ce66a2` blocked. Its comparison records eight previously reserved samples assigned to development. Treat this proposal as blocked and use the confirmed published revision.
 
 ## Verify the existing inputs

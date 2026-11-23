@@ -25,7 +25,7 @@ from pydantic import ValidationError
 from ict_pipeline.api.app import create_app
 from ict_pipeline.api.repository import FileInspectionRepository
 from ict_pipeline.api.schemas import StoredInspection
-from ict_pipeline.api.settings import APISettings, MockModel, TrustedModel
+from ict_pipeline.api.settings import APISettings, FinalizedModel, MockModel, TrustedModel
 from ict_pipeline.api.sqlite_repository import SQLiteInspectionRepository
 from ict_pipeline.inspection.service import MockPredictor
 from ict_pipeline.models.contracts import ModelName
@@ -434,6 +434,25 @@ def test_local_access_and_bearer_auth(settings: APISettings, monkeypatch: pytest
         assert response.status_code == 201 and token not in response.text and token not in caplog.text
         assert response.json()["result"]["request_id"] == "[REDACTED]"
         assert any(response.headers["X-Request-ID"] in line.message for line in caplog.records)
+
+
+def test_finalized_model_configuration_rejects_absolute_and_external_paths(tmp_path: Path) -> None:
+    model_root = tmp_path / "models"
+    spec = FinalizedModel(
+        mode="finalized",
+        model=ModelName.FASTER_RCNN,
+        run=Path("finalized-detector") / "fixture",
+        trust_finalization=True,
+    )
+    settings = APISettings(model_root=model_root, models={"finalized": spec})
+    assert settings.models["finalized"] == spec
+    with pytest.raises(ValidationError):
+        FinalizedModel(
+            mode="finalized",
+            model=ModelName.FASTER_RCNN,
+            run=tmp_path / "outside",
+            trust_finalization=True,
+        )
 
 
 def test_json_configuration_and_model_bound(settings: APISettings, tmp_path: Path,

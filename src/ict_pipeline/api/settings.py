@@ -43,10 +43,27 @@ class TrustedModel(Contract):
         return self
 
 
+class FinalizedModel(Contract):
+    mode: Literal["finalized"]
+    model: Literal[ModelName.FASTER_RCNN]
+    run: Path
+    trust_finalization: Literal[True]
+    checkpoint: Literal["best"] = "best"
+    device: Device = "cpu"
+    thresholds: InspectionThresholds = Field(default_factory=InspectionThresholds)
+
+    @model_validator(mode="after")
+    def require_relative_run(self) -> Self:
+        if (self.trust_finalization is not True or self.run.anchor or ".." in self.run.parts
+                or any(":" in part for part in self.run.parts)):
+            raise ValueError("Explicitly trust a finalized detector relative to the configured model root.")
+        return self
+
+
 class ProductModel(Contract):
     mode: Literal["multimodal"]
     product: ProductModelSpec
-    detector: TrustedModel | None = None
+    detector: TrustedModel | FinalizedModel | None = None
 
     @model_validator(mode="after")
     def check_detector(self) -> Self:
@@ -55,7 +72,7 @@ class ProductModel(Contract):
         return self
 
 
-ModelSpec = Annotated[MockModel | TrustedModel | ProductModel, Field(discriminator="mode")]
+ModelSpec = Annotated[MockModel | TrustedModel | FinalizedModel | ProductModel, Field(discriminator="mode")]
 
 
 class APISettings(Contract):
@@ -86,7 +103,7 @@ class APISettings(Contract):
     @model_validator(mode="after")
     def bound_models(self) -> Self:
         loaded = sum(
-            1 if isinstance(model, TrustedModel) else
+            1 if isinstance(model, (TrustedModel, FinalizedModel)) else
             int(isinstance(model.product, CheckpointProductModel)) + int(model.detector is not None)
             if isinstance(model, ProductModel) else 0
             for model in self.models.values()
