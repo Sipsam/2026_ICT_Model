@@ -67,6 +67,8 @@ ict run --run-id smt --dry-run --until validate_detection
 ict run --run-id detector-preview --model faster_rcnn --dry-run
 ict train --model faster_rcnn --dataset path/to/detection --dry-run
 ict evaluate --help
+ict domain-benchmark prepare --help
+ict domain-benchmark evaluate --help
 ict multimodal train --config configs/local/fpn-image-only.yaml --out outputs/reproduction/image --dry-run
 ict integrity verify-group --help
 ```

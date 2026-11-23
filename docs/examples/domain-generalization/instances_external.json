@@ -1,0 +1,15 @@
+{
+  "info": {
+    "description": "External PCB domain-generalization images"
+  },
+  "licenses": [],
+  "images": [],
+  "annotations": [],
+  "categories": [
+    {"id": 1, "name": "cold_solder", "supercategory": "pcb_defect"},
+    {"id": 2, "name": "misalignment", "supercategory": "pcb_defect"},
+    {"id": 3, "name": "short", "supercategory": "pcb_defect"},
+    {"id": 4, "name": "missing_component", "supercategory": "pcb_defect"},
+    {"id": 5, "name": "tombstone", "supercategory": "pcb_defect"}
+  ]
+}

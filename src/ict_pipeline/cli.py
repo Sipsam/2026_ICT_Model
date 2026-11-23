@@ -24,6 +24,7 @@ from .data.stages import DataStages
 from .environment.doctor import collect_environment
 from .environment.model import EnvironmentReport
 from .evaluation.contracts import EvaluationConfig, EvaluationError, EvaluationSplit
+from .evaluation.domain_commands import domain_app
 from .inspection.commands import inspect_command
 from .models.contracts import ModelName, TrainingError
 from .models.optimization.commands import training_data_app
@@ -55,6 +56,7 @@ app.add_typer(pilot_app, name="pilot")
 app.add_typer(history_app, name="history")
 app.add_typer(training_data_app, name="training-data")
 app.add_typer(multimodal_app, name="multimodal")
+app.add_typer(domain_app)
 app.command("recommend")(recommend_command)
 app.command("inspect")(inspect_command)
 app.command()(status)
