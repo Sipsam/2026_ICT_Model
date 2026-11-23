@@ -274,7 +274,21 @@ Select `storage_backend: "sqlite"` for indexed history and aggregate queries. Th
 
 Without a token the server requires a loopback peer, loopback Host header, and same-origin browser requests. Set a strong `ICT_API_TOKEN` in the process environment to require bearer auth on the API, including stored results, images, exports, and OpenAPI. The dashboard shell and its fixed static assets require a loopback bind, peer, and Host, with the same Origin check as the local API. In token mode the shell opens locally and the browser sends the supplied token on each API call. The launcher requires a token for non-loopback binds. For token-protected OpenAPI, fetch `/openapi.json` with an authenticated client. Keep the server off public networks unless it sits behind TLS, authenticated access controls, and rate limits. The built-in bearer token grants access to the entire model catalog and result store. For shared deployment, use an authenticated gateway with appropriate per-user authorization, disable raw access logs, and keep direct access to the application private.
 
-Image retrieval is opt-in through the server-owned `image_root` setting. It looks up a visible inspection by UUID, takes the hash and format from its validated image descriptor, and checks the staged bytes against the stored hash, format, and dimensions. Use a private, administrator-controlled directory. The route accepts no filesystem location from the client and returns `404 inspection_image_unavailable` for unstaged or mismatched images. Unknown or expired inspections return `404 inspection_not_found`. See [staging original images](inspection-dashboard.md#original-images).
+Original-byte retention and retrieval are opt-in through the server-owned
+`image_root` setting. When enabled, a successful uploaded JPEG or PNG is staged
+before the SQLite or file record is published. The SHA-256, format, and
+dimensions are checked. Files are named only from the lowercase image SHA-256,
+never from a caller filename or path. Temporary writes are fsync'd and published
+atomically; duplicates are accepted only after exact verification, and conflicts
+prevent record persistence rather than creating partial state. If omitted,
+history still works without image retrieval.
+
+The route looks up a visible inspection by UUID and verifies staged bytes,
+format, dimensions, and hash. Use a private, administrator-controlled directory
+and monitor private storage capacity. The route accepts no filesystem location
+from the client and returns `404 inspection_image_unavailable` for unstaged or
+mismatched images. Unknown or expired inspections return
+`404 inspection_not_found`. See [staging original images](inspection-dashboard.md#original-images).
 
 ## Python integration and tests
 

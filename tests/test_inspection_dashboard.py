@@ -101,6 +101,33 @@ def test_dashboard_filters_exports_and_statistics(settings: APISettings, backend
         assert_error(client.get(SINGLE, params={"inspection_id": "../private"}), 422, "invalid_request")
 
 
+def test_dashboard_upload_automatically_stages_original_and_rejects_conflicts(
+    settings: APISettings, tmp_path: Path,
+) -> None:
+    root = tmp_path / "retained"
+    root.mkdir()
+    configured = settings.model_copy(update={"image_root": root})
+    data = image_bytes("PNG")
+    with client_for(create_app(configured)) as client:
+        response = single(client, data=data)
+        assert response.status_code == 201
+        source = response.json()["result"]["image"]
+        staged = root / (source["sha256"] + ".png")
+        assert staged.read_bytes() == data
+
+        duplicate = single(client, data=data)
+        assert duplicate.status_code == 201
+        assert staged.read_bytes() == data
+        staged.write_bytes(b"conflicting staged bytes")
+        duplicate_conflict = single(client, data=data)
+        assert duplicate_conflict.status_code == 503
+        assert duplicate_conflict.json()["error"]["code"] == "storage_unavailable"
+        mismatched = single(client, data=image_bytes("PNG", (12, 12)))
+        assert mismatched.status_code == 201
+        mismatched_source = mismatched.json()["result"]["image"]
+        assert (root / (mismatched_source["sha256"] + ".png")).read_bytes() == image_bytes("PNG", (12, 12))
+
+
 @pytest.mark.parametrize(("format", "suffix", "mime"), [("PNG", ".png", "image/png"), ("JPEG", ".jpg", "image/jpeg")])
 def test_image_endpoint_requires_exact_staged_bytes(
     settings: APISettings, tmp_path: Path, format: str, suffix: str, mime: str,

@@ -1,6 +1,7 @@
 import {
   APIError, CLASSES, STATUSES, api, buildFilters, dailySeries, defaultDateRange,
   detectionRows, imageSize, inspectionRecord, isCount, json, pageParams, productEvidence, requirePayload,
+  inspectMultipart,
 } from "./client.mjs";
 
 const byId = id => document.getElementById(id);
@@ -17,6 +18,7 @@ const colors = ["#4dfada", "#ffd06c", "#ff9f94", "#9bd7ff", "#e2b7ff"];
 const state = {
   filters: null, token: "", order: "newest", limit: 25, offset: 0, page: null,
   loading: false, exporting: false, detailRequest: null, detailTrigger: null, imageURL: null, timer: null,
+  selectedFile: null, previewURL: null, models: [], inspectionBusy: false, comparisonRecords: [],
 };
 
 function element(tag, text, className) {
@@ -281,6 +283,7 @@ function applyFilters() {
   const mock = filters.get("mode") === "mock";
   modeLabel.textContent = mock ? "Simulated inspections" : "Real inspections";
   modeLabel.classList.toggle("mock", mock);
+  void loadModels();
   void load({overview: true});
 }
 
@@ -495,9 +498,373 @@ async function openDetail(id, trigger) {
   }
 }
 
+async function loadModels() {
+  try {
+    const response = await json("/v1/models", options());
+    requirePayload(Array.isArray(response.models));
+    state.models = response.models;
+    const select = byId("model-select");
+    select.replaceChildren();
+    for (const model of response.models) {
+      const option = element("option", model.model_id + (model.available ? "" : " — unavailable"), " ");
+      option.value = model.model_id;
+      option.disabled = !model.available;
+      select.append(option);
+    }
+    if (!response.models.some(model => model.available)) {
+      select.innerHTML = '<option value="">No models available</option>';
+    }
+    byId("workspace-status").textContent = `${response.models.filter(model => model.available).length} models available`;
+    updateModelSelection();
+  } catch (error) {
+    byId("workspace-status").textContent = "Model catalog unavailable";
+    showNotice("inspection-feedback", errorMessage(error), true);
+  }
+}
+
+function updateModelSelection() {
+  const model = state.models.find(row => row.model_id === byId("model-select").value);
+  const sensor = byId("sensor-panel");
+  sensor.hidden = !(model?.input_kind === "multimodal" && model.model_id === "fpn-sensor-concat");
+  if (model) {
+    byId("model-description").textContent = !model.available
+      ? "This model is unavailable."
+      : model.model_id === "fpn-sensor-concat"
+        ? "Sensor fusion; paired verification and capture-time evidence are required for fusion."
+        : model.model_id === "fpn-image-only"
+          ? "Image-only multilabel classification; sigmoid scores are uncalibrated."
+          : model.model_id === "faster-rcnn-final"
+            ? "Finalized Faster R-CNN object detection."
+            : model.input_kind === "multimodal"
+              ? "Multimodal product model. Sensor evidence is optional."
+              : "Configured inspection model.";
+  }
+  updateRunButton();
+}
+
+function updateRunButton() {
+  const selected = byId("model-select").value;
+  byId("run-inspection").disabled = state.inspectionBusy || !state.selectedFile || !selected;
+}
+
+async function validateImage(file) {
+  if (!file) return null;
+  if (!["image/jpeg", "image/png"].includes(file.type)) {
+    throw new Error("Choose a JPG or PNG image.");
+  }
+  if (file.size > 8 * 1024 * 1024) {
+    throw new Error("The image exceeds the 8 MiB upload limit.");
+  }
+  const dimensions = await new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      resolve({width: image.naturalWidth, height: image.naturalHeight, url});
+      URL.revokeObjectURL(url);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("The selected file is not a readable JPEG or PNG."));
+    };
+    image.src = url;
+  });
+  if (dimensions.width * dimensions.height > 16_000_000
+      || dimensions.width > 6000 || dimensions.height > 6000) {
+    throw new Error("The image exceeds the server pixel or dimension limit.");
+  }
+  return dimensions;
+}
+
+async function selectFile(file) {
+  showNotice("upload-feedback");
+  try {
+    const dimensions = await validateImage(file);
+    if (!dimensions) return;
+    if (state.previewURL) URL.revokeObjectURL(state.previewURL);
+    state.selectedFile = file;
+    state.previewURL = URL.createObjectURL(file);
+    byId("image-preview").src = state.previewURL;
+    byId("image-name").textContent = file.name;
+    byId("image-meta").textContent = `${integer(file.size)} bytes · ${dimensions.width} × ${dimensions.height} px · ${file.type}`;
+    byId("image-preview-wrap").hidden = false;
+    byId("dropzone").hidden = true;
+  } catch (error) {
+    state.selectedFile = null;
+    showNotice("upload-feedback", error.message, true);
+  } finally {
+    updateRunButton();
+  }
+}
+
+function clearSelectedImage() {
+  state.selectedFile = null;
+  byId("image-file").value = "";
+  byId("image-preview-wrap").hidden = true;
+  byId("dropzone").hidden = false;
+  if (state.previewURL) URL.revokeObjectURL(state.previewURL);
+  state.previewURL = null;
+  showNotice("upload-feedback");
+  updateRunButton();
+}
+
+function sensorPayload() {
+  const channelIds = ["temperature", "humidity", "vibration", "acceleration", "noise"];
+  const units = ["°C", "%", "m/s²", "g", "dB"];
+  const values = channelIds.map(name => {
+    const value = byId("sensor-" + name).value;
+    return value === "" ? null : Number(value);
+  });
+  const timestamp = byId("capture-time").value;
+  const hasValues = values.some(value => value !== null);
+  if (!timestamp || !hasValues) return null;
+  if (!Number.isFinite(Date.parse(timestamp))) return null;
+  const captureTimestamp = timestamp.length === 16 ? timestamp + ":00Z" : timestamp + "Z";
+  return {
+    capture_timestamp: captureTimestamp,
+    sensor_evidence: {
+      source_id: byId("sensor-source").value.trim() || "dashboard-sensor",
+      sequence: {
+        channels: channelIds,
+        units,
+        steps: [{timestamp: captureTimestamp, values}],
+      },
+    },
+  };
+}
+
+function modelRequestDetails(modelId) {
+  const id = crypto.randomUUID();
+  const details = {
+    model_id: modelId,
+    request_id: "dashboard-" + id,
+    source_id: "dashboard-camera",
+    sample_id: "dashboard-" + id,
+  };
+  const model = state.models.find(row => row.model_id === modelId);
+  if (model?.input_kind === "multimodal" && modelId === "fpn-sensor-concat") {
+    const sensor = sensorPayload();
+    if (sensor) Object.assign(details, sensor);
+  }
+  return details;
+}
+
+function renderProductScores(container, product) {
+  const view = productEvidence(product);
+  container.append(element("h3", "Classification scores"));
+  container.append(element("p", view.scoreLabel + " · fixed threshold " + product.threshold.toFixed(2), "muted"));
+  if (!view.scores.length) {
+    container.append(element("p", "No usable product scores.", "muted"));
+    return;
+  }
+  const bars = element("div", undefined, "score-bars");
+  for (const row of view.scores) {
+    const item = element("div", undefined, "score-row");
+    const label = element("div");
+    label.append(element("span", row.name), element("strong",
+      row.score.toFixed(4) + (row.threshold_crossed ? " · above threshold" : " · below threshold")));
+    const track = element("span", undefined, "track");
+    const fill = element("span", undefined, row.threshold_crossed ? "score-above" : "");
+    fill.style.width = (100 * row.score).toFixed(2) + "%";
+    track.append(fill);
+    item.append(label, track);
+    bars.append(item);
+  }
+  container.append(bars);
+  container.append(element("p",
+    "These are uncalibrated sigmoid outputs, not calibrated probabilities.", "muted"));
+}
+
+let activeWorkspaceImage = null;
+
+function renderWorkspaceResult(records) {
+  state.comparisonRecords = records;
+  const content = byId("result-content");
+  content.replaceChildren();
+  byId("inspection-result").hidden = false;
+  const grid = element("div", undefined, "result-grid");
+  const media = element("div");
+  const analysis = element("div");
+  grid.append(media, analysis);
+  content.append(grid);
+  if (state.previewURL) {
+    activeWorkspaceImage = new Image();
+    activeWorkspaceImage.onload = () => renderWorkspaceBoxes(media);
+    activeWorkspaceImage.src = state.previewURL;
+  }
+  for (const record of records) {
+    const card = element("article", undefined, "model-result");
+    const result = record.result;
+    card.append(element("h3", record.model_id), statusBadge(result.outcome));
+    card.append(element("p", result.reason, "muted"));
+    if (result.multimodal) renderProductScores(card, result.multimodal);
+    if (result.detections.length) {
+      card.append(element("p", `${result.detections.length} retained detection(s)`, "muted"));
+    } else if (!result.multimodal) {
+      card.append(element("p", "No retained detections.", "muted"));
+    }
+    analysis.append(card);
+  }
+  byId("save-result").disabled = records.length === 0;
+  renderWorkspaceBoxes(media);
+}
+
+function renderWorkspaceBoxes(media) {
+  if (!activeWorkspaceImage?.complete || !state.previewURL) return;
+  const record = state.comparisonRecords.find(row => row.result.image);
+  if (!record) {
+    media.replaceChildren(element("p", "No original-image result was returned.", "notice"));
+    return;
+  }
+  const result = record.result;
+  const image = result.image;
+  const rows = detectionRows(result.detections, image).filter(row =>
+    !byId("class-filter").value || row.name === byId("class-filter").value);
+  const figure = element("figure");
+  const stage = element("div", undefined, "image-stage");
+  stage.style.aspectRatio = image.width + " / " + image.height;
+  stage.style.maxWidth = "840px";
+  const original = element("img");
+  original.src = state.previewURL;
+  original.alt = "Uploaded PCB with inspection overlay";
+  stage.append(original);
+  if (byId("box-visibility").value === "show") {
+    for (const row of rows) {
+      const box = element("div", undefined, "box");
+      box.style.setProperty("--box", colors[CLASSES.indexOf(row.name)]);
+      for (const [key, value] of Object.entries(row.rect)) box.style[key] = value + "%";
+      box.append(element("span", detectionLabel(row)));
+      stage.append(box);
+    }
+  }
+  figure.append(stage);
+  figure.append(element("figcaption",
+    `${rows.length} displayed box(es) · coordinates use the ${image.width} × ${image.height} original pixel grid.`));
+  media.replaceChildren(figure);
+}
+
+function compareTargets() {
+  const available = state.models.filter(model => model.available);
+  if (!byId("compare-models").checked) {
+    const selected = byId("model-select").value;
+    return available.filter(model => model.model_id === selected);
+  }
+  return available.filter(model => model.model_id === "faster-rcnn-final"
+    || model.model_id === "fpn-image-only"
+    || (model.model_id === "fpn-sensor-concat" && sensorPayload() !== null));
+}
+
+async function runInspection() {
+  if (state.inspectionBusy || !state.selectedFile) return;
+  const targets = compareTargets();
+  if (!targets.length) {
+    showNotice("inspection-feedback", "Select an available model.", true);
+    return;
+  }
+  const selectedSensor = targets.find(model => model.model_id === "fpn-sensor-concat");
+  if (selectedSensor && sensorPayload() === null) {
+    showNotice("inspection-feedback",
+      "Sensor Concat requires capture timestamp and at least one observed sensor value for paired evidence.",
+      true);
+    return;
+  }
+  state.inspectionBusy = true;
+  updateRunButton();
+  showNotice("inspection-feedback", `Running ${targets.length} inspection(s)…`);
+  byId("workspace-status").textContent = "Inference in progress";
+  const records = [];
+  const failures = [];
+  for (const model of targets) {
+    const details = modelRequestDetails(model.model_id);
+    try {
+      const record = await inspectMultipart(model.input_kind === "multimodal"
+        ? "/v1/inspections/multimodal" : "/v1/inspections", {
+        file: state.selectedFile, details, token: state.token,
+      });
+      records.push(inspectionRecord(record));
+    } catch (error) {
+      failures.push(`${model.model_id}: ${error.code ? error.message + " (" + error.code + ")" : errorMessage(error)}`);
+    }
+  }
+  state.inspectionBusy = false;
+  updateRunButton();
+  if (records.length) {
+    renderWorkspaceResult(records);
+    showNotice("inspection-feedback",
+      `${records.length} successful · ${failures.length} failed${failures.length ? ". " + failures.join(" | ") : "."}`);
+  } else {
+    showNotice("inspection-feedback", failures.join(" | ") || "The inspection failed.", true);
+  }
+  byId("workspace-status").textContent = records.length ? "Inspection complete" : "Inspection failed";
+  void load({overview: true});
+}
+
 form.addEventListener("submit", event => {
   event.preventDefault();
   if (!state.loading && !state.exporting) applyFilters();
+});
+byId("choose-image").addEventListener("click", () => byId("image-file").click());
+byId("image-file").addEventListener("change", event => void selectFile(event.target.files[0]));
+byId("clear-image").addEventListener("click", clearSelectedImage);
+const dropzone = byId("dropzone");
+for (const eventName of ["dragenter", "dragover"]) {
+  dropzone.addEventListener(eventName, event => {
+    event.preventDefault();
+    dropzone.classList.add("dragging");
+  });
+}
+for (const eventName of ["dragleave", "drop"]) {
+  dropzone.addEventListener(eventName, event => {
+    event.preventDefault();
+    dropzone.classList.remove("dragging");
+  });
+}
+dropzone.addEventListener("drop", event => void selectFile(event.dataTransfer?.files[0]));
+dropzone.addEventListener("keydown", event => {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    byId("image-file").click();
+  }
+});
+byId("model-select").addEventListener("change", updateModelSelection);
+byId("run-inspection").addEventListener("click", () => void runInspection());
+byId("box-visibility").addEventListener("change", () => renderWorkspaceBoxes(byId("result-content").querySelector(".result-grid > div")));
+byId("class-filter").addEventListener("change", () => renderWorkspaceBoxes(byId("result-content").querySelector(".result-grid > div")));
+byId("save-result").addEventListener("click", () => {
+  if (!activeWorkspaceImage?.complete) return;
+  const record = state.comparisonRecords.find(row => row.result.image);
+  if (!record) return;
+  const image = record.result.image;
+  const canvas = document.createElement("canvas");
+  canvas.width = image.width;
+  canvas.height = image.height;
+  const context = canvas.getContext("2d");
+  context.drawImage(activeWorkspaceImage, 0, 0, image.width, image.height);
+  if (byId("box-visibility").value === "show") {
+    const rows = detectionRows(record.result.detections, image).filter(row =>
+      !byId("class-filter").value || row.name === byId("class-filter").value);
+    context.lineWidth = Math.max(2, image.width / 400);
+    for (const row of rows) {
+      const [x1, y1, x2, y2] = row.coordinates;
+      context.strokeStyle = colors[CLASSES.indexOf(row.name)];
+      context.strokeRect(x1, y1, x2 - x1, y2 - y1);
+      context.fillStyle = "#132931";
+      context.fillRect(x1, Math.max(0, y1 - 24), Math.max(80, context.measureText(detectionLabel(row)).width + 8), 24);
+      context.fillStyle = colors[CLASSES.indexOf(row.name)];
+      context.font = `${Math.max(12, image.width / 80)}px sans-serif`;
+      context.fillText(detectionLabel(row), x1 + 4, Math.max(16, y1 - 6));
+    }
+  }
+  canvas.toBlob(blob => {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const link = element("a");
+    link.href = url;
+    link.download = "pcb-inspection-result.png";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }, "image/png");
 });
 byId("refresh").addEventListener("click", () => void load({overview: true}));
 byId("source-refresh").addEventListener("click", async event => {
@@ -554,4 +921,5 @@ dialog.addEventListener("close", () => {
 const [from, through] = defaultDateRange();
 form.elements.from.value = from;
 form.elements.through.value = through;
+byId("capture-time").value = new Date(Date.now()).toISOString().slice(0, 16);
 applyFilters();

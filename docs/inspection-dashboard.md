@@ -1,6 +1,10 @@
 # Inspection dashboard
 
-The dashboard is a read-only browser interface for the local inspection API. It uses the existing version 1 history, detail, statistics, and export endpoints with either the file or SQLite repository. FastAPI serves the HTML, CSS, and JavaScript with the API. No frontend build is required.
+The dashboard provides both interactive image inspection and read-only history
+for the local inspection API. It uses the existing version 1 upload, history,
+detail, statistics, model catalog, and export endpoints with either the file or
+SQLite repository. FastAPI serves the HTML, CSS, and JavaScript with the API.
+No frontend build is required.
 
 ## Start locally
 
@@ -13,6 +17,27 @@ python -m ict_pipeline.api
 Open [the dashboard](http://127.0.0.1:8000/dashboard). Use the configured port if `ICT_API_CONFIG` changes it. The dashboard is served on loopback binds only. If you configured `ICT_API_TOKEN`, expand **API access**, enter the token, and select **Apply filters**. The page sends it in the Authorization header and keeps it only in page memory. API access to all records and staged originals follows the server's access rules. Keep the service and data roots private. See the [REST API access controls](rest-api.md#storage-and-access-controls).
 
 The default model catalog includes `mock-empty` and `mock-defect`. Submit a local JPEG or PNG through the [API upload examples](rest-api.md#curl-examples), choose **Simulated inspections**, and apply the filters. Mock mode uses Pillow and runs without trained weights. The overview and history open in the **Real inspections** view, which excludes mock records. The simulated view contains only mock records, labels the rows and details as simulated, and leaves their stored outcomes and reasons intact.
+
+## Run an inspection
+
+Use **Inspection workspace** to choose or drag and drop a JPG or PNG, preview
+its dimensions, select an available model returned by `GET /v1/models`, and run
+the existing single or multimodal upload endpoint. The page blocks duplicate
+submissions while inference is active and does not show failed HTTP requests as
+stored history.
+
+Faster R-CNN and image-only inputs use the uploaded image directly. Image-only
+and Sensor Concat results render their sigmoid score bars separately from
+detection boxes; scores are explicitly uncalibrated sigmoid outputs. Sensor
+Concat additionally accepts the five documented channel values and capture
+timestamp. Sending sensor evidence requires a matching server-owned
+PairingReceipt and capture-time sensor policy. Missing or mismatched evidence
+returns the existing API validation error. The UI does not bypass pairing or
+present unverified fusion as a paired result.
+
+**Run available models and compare** submits the available finalized detector
+and FPN arms sequentially. Sensor Concat is included only when sensor evidence
+is complete. A failed model does not hide successful comparison results.
 
 ## Browse inspections
 
@@ -27,7 +52,13 @@ The default model catalog includes `mock-empty` and `mock-defect`. Submit a loca
 
 ## Original images
 
-The API keeps image dimensions, format, and SHA-256 in each successful record. It does not retain uploaded image bytes. To display an original, set `image_root` in the JSON file selected by `ICT_API_CONFIG`, then restart the API. For example, use the following settings with a dedicated private staging directory writable only by trusted operators.
+The API keeps image dimensions, format, and SHA-256 in each successful record.
+Set `image_root` in the JSON file selected by `ICT_API_CONFIG` to opt in to
+automatic original-byte retention. If omitted, record behavior remains unchanged
+and the dashboard reports the original image as unavailable.
+
+For example, use the following settings with a dedicated private staging
+directory writable only by trusted operators.
 
 ```json
 {
@@ -37,7 +68,16 @@ The API keeps image dimensions, format, and SHA-256 in each successful record. I
 }
 ```
 
-Copy the exact original bytes into the staging directory using the lower-case SHA-256 from `result.image.sha256` as the basename. Use `.jpg` for JPEG or `.png` for PNG, regardless of the original filename. Leave source files in place. An inspection UUID is the only identifier used by the browser's image request. The server resolves that UUID through the repository and checks the staged file's hash, format, and original dimensions before serving it. Only stage images appropriate for the users who can access the API. Staged originals are managed separately from record retention and backups.
+When enabled, the server verifies the decoded image, writes the upload atomically
+by lower-case SHA-256 basename, and uses `.jpg` for JPEG or `.png` for PNG.
+Duplicate SHA-256 files are reused only after exact byte verification. The image
+is retained only when record persistence succeeds; partial temporary files are
+removed, and a conflicting staged file prevents a new record from being
+published. Client-provided filenames and paths are never used. An inspection UUID
+is the only identifier used by the browser's image request. The server resolves
+that UUID through the repository and checks the staged file's hash, format, and
+original dimensions before serving it. Staged originals require private storage
+capacity and backup management separate from record retention.
 
 Boxes follow the original encoded pixel grid, including when a JPEG has EXIF orientation metadata. The image and overlay resize together with the same aspect ratio. The detection list retains class names, confidence scores, and coordinates when the original is unavailable. Failed records may have no image descriptor.
 

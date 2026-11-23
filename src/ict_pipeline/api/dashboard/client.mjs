@@ -91,6 +91,29 @@ export async function json(path, options) {
   return data;
 }
 
+export async function inspectMultipart(path, {file, details, token, signal}) {
+  const url = new URL(path, window.location.origin);
+  if (url.origin !== window.location.origin || !url.pathname.startsWith("/v1/")) {
+    throw new Error("Invalid inspection API endpoint.");
+  }
+  const form = new FormData();
+  form.set("details", JSON.stringify(details));
+  if (file) form.set("image", file, file.name || "pcb.png");
+  const headers = token ? {Authorization: "Bearer " + token} : {};
+  const timeout = AbortSignal.timeout(30_000);
+  const response = await fetch(url, {
+    method: "POST", headers, body: form, signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+    redirect: "error", cache: "no-store",
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    throw new APIError(response.status, body?.error?.code);
+  }
+  const data = await response.json();
+  requirePayload(data?.schema_version === 1);
+  return data;
+}
+
 export function requirePayload(condition) {
   if (!condition) throw new Error("The API returned an invalid or unsupported response.");
 }

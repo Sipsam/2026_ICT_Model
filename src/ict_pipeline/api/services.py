@@ -1,11 +1,14 @@
 """Model lifecycle, bounded inference, and inspection persistence."""
 
 import asyncio
+import hashlib
 import logging
+import os
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from threading import Event
 from typing import Literal
 from uuid import UUID, uuid4
@@ -120,11 +123,13 @@ class Upload:
 class InspectionAPI:
     def __init__(
         self, settings: APISettings, models: ModelManager, repository: InspectionRepository, scratch: Path,
+        image_root: Path | None = None,
     ) -> None:
         self.settings = settings
         self.models = models
         self.repository = repository
         self.scratch = scratch
+        self.image_root = image_root
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ict-inspect")
         self._active: Future[list[StoredInspection | APIError]] | None = None
 
@@ -179,13 +184,51 @@ class InspectionAPI:
             raise APIError("inference_timeout") from None
         finally:
             cancelled.set()
-        return await run_in_threadpool(self._persist, results)
+        return await run_in_threadpool(self._persist, results, items)
 
-    def _persist(self, results: list[StoredInspection | APIError]) -> tuple[BatchItem, ...]:
+    @staticmethod
+    def _retain_image(root: Path, record: StoredInspection, data: bytes) -> None:
+        source = record.result.image
+        if source is None:
+            return
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if hashlib.sha256(data).hexdigest() != source.sha256:
+            raise OSError("Uploaded image bytes changed while publishing.")
+        suffix = ".jpg" if source.format == "JPEG" else ".png"
+        target = root / f"{source.sha256}{suffix}"
+        temporary = None
+        try:
+            if target.exists():
+                if target.is_symlink():
+                    raise OSError("Refuse to replace a symbolic link in image_root.")
+                from .inspection_images import original_image
+                try:
+                    existing, _ = original_image(root, source)
+                except APIError:
+                    raise OSError("An existing staged image does not match the inspection.") from None
+                if existing != data:
+                    raise OSError("An existing staged image conflicts with the inspection.")
+                return
+            with NamedTemporaryFile(dir=root, prefix=".pending-", delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            target.hardlink_to(temporary)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+    def _persist(
+        self, results: list[StoredInspection | APIError], uploads: list[Upload | APIError],
+    ) -> tuple[BatchItem, ...]:
         records = []
         for index, result in enumerate(results):
             if isinstance(result, StoredInspection):
                 try:
+                    upload = uploads[index] if index < len(uploads) else None
+                    if self.image_root is not None and isinstance(upload, Upload) and upload.data is not None:
+                        self._retain_image(self.image_root, result, upload.data)
                     self.repository.add(result)
                 except (OSError, ValueError):
                     result = APIError("storage_unavailable")

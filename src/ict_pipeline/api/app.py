@@ -148,7 +148,7 @@ def create_app(
         with temporary as directory:
             scratch = Path(directory)
             models = await run_in_threadpool(ModelManager, settings, scratch, credentials, predictor_factory)
-            inspections = InspectionAPI(settings, models, store, scratch)
+            inspections = InspectionAPI(settings, models, store, scratch, image_root)
             app.state.inspections = inspections
             app.state.inspection_image_root = image_root
             stream = build_stream(settings, models, store, credentials)
