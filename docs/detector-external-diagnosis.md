@@ -1,0 +1,76 @@
+# Faster R-CNN external-image candidate diagnosis
+
+## Runtime verification
+
+The CPU inference environment reports PyTorch 2.6.0+cu126 and TorchVision
+0.21.0+cu126. The implementation uses the installed TorchVision implementation:
+
+- RPN proposals are captured from `torchvision.models.detection.rpn.RegionProposalNetwork`.
+- ROI proposals are captured at `RoIHeads.forward`.
+- `box_predictor` returns `class_logits` as `(N, C)` and `box_regression`
+  as `(N, C * 4)`.
+- For this runtime, `BoxCoder.decode()` returns `(N, C, 4)`.
+- Classification scores are `softmax(class_logits, dim=-1)`.
+- Decoded boxes are clipped to the transformed image shape, converted to
+  original-image coordinates with `GeneralizedRCNNTransform.postprocess()`,
+  and flattened across background-excluding classes.
+- TorchVision applies confidence filtering, small-box removal, class-aware
+  `batched_nms`, and `detections_per_img` in that order.
+
+## Smoke test
+
+A CPU smoke test loaded the unchanged finalized checkpoint `best.pt` and used
+a synthetic, PCB-like image. The runtime returned 25 RPN proposals and 25 ROI
+proposals. Candidate reconstruction was available. No non-background candidate
+survived the model's box and confidence stages, so the synthetic image produced
+0 final detections.
+
+This is a checkpoint/execution smoke test, not an external cold-solder or
+misalignment result.
+
+## External-image availability
+
+No local cold-solder or misalignment PCB image was found under the repository,
+the user's Downloads/Pictures directories, or `D:\test-images`. Therefore, no
+claim is made about real external cold-solder or misalignment cases.
+
+The diagnostic CLI is:
+
+```powershell
+.\.venv-infer\Scripts\python.exe -m ict_pipeline.diagnostics.detector `
+    --image "D:\test-images\cold-solder.jpg" `
+    --config ".\api-final.json" `
+    --confidence 0.25 `
+    --nms-iou 0.5 `
+    --nms-iou 0.7 `
+    --nms-iou 0.9
+```
+
+Run each suspected cold-solder or misalignment image separately. The JSON
+reports RPN/ROI counts, per-class score maxima and counts, confidence removal
+counts, NMS removal counts, and public-vs-diagnostic invariance. AP, precision,
+and recall are not defined without external ground-truth boxes.
+
+## Verification status
+
+Verified facts:
+
+- RPN and ROI proposal counts can be captured.
+- The actual runtime tensor layouts are validated before candidate recovery.
+- Candidate shape mismatch is reported as `unavailable`, not converted to 0.
+- Class scores, decoded boxes, confidence filtering, NMS counts, and original
+  coordinate restoration are implemented at the TorchVision stage boundaries.
+- The diagnostic and public model paths compare only with the same confidence
+  and NMS settings.
+
+Not yet verified:
+
+- Real external cold-solder or misalignment outcomes.
+- Whether external failure is dominated by RPN coverage, ROI classification,
+  regression quality, confidence, NMS, or preprocessing.
+
+Postprocessing thresholds can be further tested with confidence/NMS sweeps,
+but changing them should not be interpreted as evidence of improved defect
+performance without ground-truth external evaluation. Fine-tuning or retraining
+is needed only after real external samples are collected and analyzed through
+an approved evaluation protocol.

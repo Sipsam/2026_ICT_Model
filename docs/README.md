@@ -20,6 +20,7 @@
 - [Windows, Linux, WSL2, macOS](platforms.md) · [실행 환경](runtime.md) · [문제 해결](troubleshooting.md)
 - [검사 CLI와 결과 계약](inspection-interface.md) · [REST API](rest-api.md) · [스트리밍](input-streaming.md)
 - [SQLite 이력](inspection-database.md) · [대시보드](inspection-dashboard.md) · [합성 서비스 통합 검증](inspection-e2e.md)
+- [Faster R-CNN 외부 이미지 후보 진단](detector-external-diagnosis.md)
 
 ## 이전 검증 기록
 
