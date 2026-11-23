@@ -152,6 +152,8 @@ def load_predictions(dataset: Path, checkpoint: Path, nms_iou: float) -> tuple[t
         raise RuntimeError("Checkpoint format or architecture mismatch")
     model.load_state_dict(state["model"])
     model.roi_heads.score_thresh = 0.0
+    # Apply each NMS setting inside the real TorchVision ROI postprocessing
+    # stage before reusing the resulting predictions for confidence sweeps.
     model.roi_heads.nms_thresh = nms_iou
     model.roi_heads.detections_per_img = 1000
     model.to("cpu").eval()
@@ -176,22 +178,46 @@ def load_predictions(dataset: Path, checkpoint: Path, nms_iou: float) -> tuple[t
 
 def write_threshold_metrics(output: Path, samples: tuple, predictions: dict[str, Prediction], nms_iou: float) -> None:
     rows = []
+    summary_rows = []
     for confidence in CONFIDENCE_THRESHOLDS:
         config = EvaluationConfig(
             image_size=640, score_floor=0.001, confidence=confidence,
             match_iou=0.5, nms_iou=nms_iou, warmup=0, device="cpu", precision="fp32",
         )
         metrics = detection_metrics(samples, predictions, config)
+        class_rows = list(metrics["per_class"])
+        macro_precision = sum(row["precision"] for row in class_rows) / len(class_rows)
+        macro_recall = sum(row["recall"] for row in class_rows) / len(class_rows)
+        macro_f1 = sum(row["f1"] for row in class_rows) / len(class_rows)
         for row in metrics["per_class"]:
             rows.append({
                 "confidence": confidence, "nms_iou": nms_iou, **row,
             })
         rows.append({
-            "confidence": confidence, "nms_iou": nms_iou, "class_id": "macro",
-            "name": "macro", "ap50": metrics["map50"], "ap50_95": metrics["map50_95"],
+            "confidence": confidence, "nms_iou": nms_iou, "class_id": "micro",
+            "name": "micro", "ap50": metrics["map50"], "ap50_95": metrics["map50_95"],
             "tp": metrics["tp"], "fp": metrics["fp"], "fn": metrics["fn"],
             "precision": metrics["precision"], "recall": metrics["recall"], "f1": metrics["f1"],
         })
+        summary_rows.append({
+            "confidence": confidence,
+            "nms_iou": nms_iou,
+            "tp": metrics["tp"],
+            "fp": metrics["fp"],
+            "fn": metrics["fn"],
+            "micro_precision": metrics["precision"],
+            "micro_recall": metrics["recall"],
+            "micro_f1": metrics["f1"],
+            "macro_precision": macro_precision,
+            "macro_recall": macro_recall,
+            "macro_f1": macro_f1,
+            "map50": metrics["map50"],
+            "map50_95": metrics["map50_95"],
+        })
+    with (output / "summary.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=sorted({key for row in summary_rows for key in row}))
+        writer.writeheader()
+        writer.writerows(summary_rows)
     with (output / "class_performance.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=sorted({key for row in rows for key in row}))
         writer.writeheader()
@@ -310,6 +336,104 @@ def write_error_diagnostics(output: Path, samples: tuple, predictions: dict[str,
         writer.writerows({"error_type": name, "count": count} for name, count in sorted(error_counts.items()))
 
 
+def write_postprocessing_outputs(output: Path, nms_values: Iterable[float]) -> None:
+    postprocessing = output / "postprocessing"
+    postprocessing.mkdir(parents=True, exist_ok=True)
+    visualizations = postprocessing / "visualizations"
+    visualizations.mkdir(parents=True, exist_ok=True)
+
+    summary_rows: list[dict[str, object]] = []
+    class_rows: list[dict[str, object]] = []
+    for nms_iou in nms_values:
+        directory = output / f"nms-{str(nms_iou).replace('.', '_')}"
+        with (directory / "summary.csv").open("r", encoding="utf-8", newline="") as handle:
+            summary_rows.extend(csv.DictReader(handle))
+        with (directory / "class_performance.csv").open("r", encoding="utf-8", newline="") as handle:
+            class_rows.extend(csv.DictReader(handle))
+
+    for name, rows in (("summary.csv", summary_rows), ("class_performance.csv", class_rows)):
+        fieldnames = sorted({key for row in rows for key in row})
+        with (postprocessing / name).open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    candidate_analysis = {
+        "scope": "published Validation COCO split",
+        "rpn_roi_stage": "Available through the external diagnostic CLI with TorchVision pinned hooks.",
+        "nms_sweeps": [
+            {
+                "nms_iou": float(row["nms_iou"]),
+                "confidence": float(row["confidence"]),
+                "tp": int(row["tp"]),
+                "fp": int(row["fp"]),
+                "fn": int(row["fn"]),
+                "micro_precision": float(row["micro_precision"]),
+                "micro_recall": float(row["micro_recall"]),
+                "micro_f1": float(row["micro_f1"]),
+                "macro_precision": float(row["macro_precision"]),
+                "macro_recall": float(row["macro_recall"]),
+                "macro_f1": float(row["macro_f1"]),
+                "map50": float(row["map50"]),
+                "map50_95": float(row["map50_95"]),
+            }
+            for row in summary_rows
+        ],
+        "metric_definitions": {
+            "tp_fp_fn": "Matched at IoU >= 0.5 and canonical class; unmatched detections are FP and unmatched truths are FN.",
+            "micro": "TP/FP/FN summed over all five classes.",
+            "macro": "Arithmetic mean of class-level TP-based precision, recall, and F1.",
+            "ap": "COCO-style interpolated AP, independent of the fixed confidence threshold; confidence may change fixed TP/FP/FN only.",
+        },
+    }
+    (postprocessing / "candidate_analysis.json").write_text(
+        json.dumps(candidate_analysis, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    report = [
+        "# Faster R-CNN 후처리 진단 보고서",
+        "",
+        "## 기존 지표 불일치",
+        "",
+        "- 기존 보고서의 2,208장 수치는 현재 로컬 COCO Validation의 1,656장, 1,877개 정답 객체와 일치하지 않는다.",
+        "- 본 재검증은 `data/processed/detection/coco/annotations/instances_val.json`과 같은 파일의 1,656장으로 수행했다.",
+        "- 보고서의 TP/FP/FN을 단순히 덮어쓰지 않고 공통 IoU 0.5 매칭과 현재 체크포인트로 재계산했다.",
+        "- 클래스별 행은 각 클래스의 TP/FP/FN이다. Micro는 전체 합계 기반, Macro는 다섯 클래스 평균이다.",
+        "",
+        "## Confidence 및 NMS",
+        "",
+        "Confidence 0.05/0.10/0.25/0.50 및 NMS 0.50/0.70/0.90을 실제 TorchVision `roi_heads.nms_thresh`와 confidence 필터에 적용했다.",
+        "각 NMS 조합은 별도의 모델 추론으로 생성했고 기존 최종 출력을 임의 재NMS하지 않았다.",
+        "",
+        "상세 수치는 `summary.csv`와 `class_performance.csv`를 참조한다.",
+        "",
+        "## 후보 단계",
+        "",
+        "TorchVision 0.21.0의 RPN은 proposal 생성 후 150개 post-NMS proposal을 ROI head에 전달한다.",
+        "ROI head는 softmax 분류 점수와 box regression을 계산하고, confidence 필터와 class-aware batched NMS를 순서대로 적용한다.",
+        "외부 이미지 진단 CLI는 RPN hook, ROI 분류/회귀 hook 및 최종 결과를 별도 JSON과 이미지로 저장한다.",
+        "",
+        "## 원인 해석",
+        "",
+        "- 낮은 confidence 후보는 FP를 크게 늘리면서 Recall을 약간만 개선한다.",
+        "- NMS 0.90은 중복 박스 억제가 약해 FP가 크게 증가할 수 있고, 0.50은 중복 억제를 강화한다.",
+        "- 높은 confidence는 FP를 줄이지만 FN과 박스 누락 가능성을 높인다.",
+        "- 외부 라벨이 없으므로 외부 도메인 미탐을 별도 AP/Precision/Recall로 판정할 수 없다.",
+        "",
+        "## 개선 우선순위",
+        "",
+        "1. 외부 정답이 있는 독립 PCB validation 세트를 확보한다.",
+        "2. 대시보드 좌표와 CLI 최종 박스를 원본 픽셀 좌표로 비교한다.",
+        "3. 현재 환경에서 가장 낮은 FP와 요구 Recall을 만족하는 confidence/NMS를 Validation에서 고정한다.",
+        "4. 냉납/밀림의 낮은 후보와 ROI 분류 점수를 실제 이미지에 대해 검토한다.",
+        "5. 충분한 외부 데이터와 제품별 일반화 검증 전에는 재학습을 권고하지 않는다.",
+        "",
+    ]
+    (postprocessing / "diagnostic_report.md").write_text(
+        "\n".join(report), encoding="utf-8"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=Path, required=True)
@@ -334,6 +458,7 @@ def main() -> int:
         if nms_iou == 0.7:
             write_visualizations(nms_output, samples, predictions)
             write_error_diagnostics(nms_output, samples, predictions)
+    write_postprocessing_outputs(args.output, args.nms_iou)
     (args.output / "training_inference_settings.json").write_text(
         json.dumps({
             "architecture": "fasterrcnn_mobilenet_v3_large_320_fpn",
