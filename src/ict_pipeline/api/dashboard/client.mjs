@@ -91,6 +91,21 @@ export async function json(path, options) {
   return data;
 }
 
+export function modelCatalog(payload) {
+  requirePayload(payload && typeof payload === "object" && !Array.isArray(payload)
+    && Array.isArray(payload.models));
+  requirePayload(payload.models.every(model => model && typeof model === "object"
+    && typeof model.model_id === "string" && model.model_id.length > 0
+    && ["mock", "real", "finalized"].includes(model.mode)
+    && typeof model.available === "boolean"
+    && (model.model === undefined || model.model === null || typeof model.model === "string")
+    && (model.mock_scenario === undefined || model.mock_scenario === null
+      || typeof model.mock_scenario === "string")
+    && (model.input_kind === undefined || model.input_kind === null
+      || model.input_kind === "multimodal")));
+  return payload.models;
+}
+
 export async function inspectMultipart(path, {file, details, token, signal}) {
   const url = new URL(path, window.location.origin);
   if (url.origin !== window.location.origin || !url.pathname.startsWith("/v1/")) {

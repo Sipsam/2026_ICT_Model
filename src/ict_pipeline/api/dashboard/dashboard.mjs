@@ -1,7 +1,7 @@
 import {
   APIError, CLASSES, STATUSES, api, buildFilters, dailySeries, defaultDateRange,
   buildModelRequest, datetimeLocalToISO, detectionRows, imageSize, inspectionRecord, isCount, json,
-  inspectionEndpoint, pageParams, productEvidence, requirePayload, inspectMultipart, selectDetectionRecord,
+  inspectionEndpoint, modelCatalog, pageParams, productEvidence, requirePayload, inspectMultipart, selectDetectionRecord,
 } from "./client.mjs";
 
 const byId = id => document.getElementById(id);
@@ -500,25 +500,34 @@ async function openDetail(id, trigger) {
 
 async function loadModels() {
   try {
-    const response = await json("/v1/models", options());
-    requirePayload(Array.isArray(response.models));
-    state.models = response.models;
+    const response = await api("/v1/models", options());
+    const payload = await response.json().catch(() => null);
+    const models = modelCatalog(payload);
+    state.models = models;
     const select = byId("model-select");
     select.replaceChildren();
-    for (const model of response.models) {
+    for (const model of models) {
       const option = element("option", model.model_id + (model.available ? "" : " — unavailable"), " ");
       option.value = model.model_id;
       option.disabled = !model.available;
       select.append(option);
     }
-    if (!response.models.some(model => model.available)) {
+    const available = models.filter(model => model.available);
+    if (!available.length) {
       select.innerHTML = '<option value="">No models available</option>';
+    } else if (select.value === "" || !models.find(model => model.model_id === select.value)?.available) {
+      select.value = available[0].model_id;
     }
-    byId("workspace-status").textContent = `${response.models.filter(model => model.available).length} models available`;
+    byId("workspace-status").textContent = `${available.length} models available`;
     updateModelSelection();
   } catch (error) {
+    state.models = [];
+    const select = byId("model-select");
+    select.replaceChildren(element("option", "Model catalog unavailable", " "));
+    select.value = "";
     byId("workspace-status").textContent = "Model catalog unavailable";
     showNotice("inspection-feedback", errorMessage(error), true);
+    updateRunButton();
   }
 }
 
@@ -544,7 +553,8 @@ function updateModelSelection() {
 
 function updateRunButton() {
   const selected = byId("model-select").value;
-  byId("run-inspection").disabled = state.inspectionBusy || !state.selectedFile || !selected;
+  const available = state.models.find(model => model.model_id === selected)?.available;
+  byId("run-inspection").disabled = state.inspectionBusy || !state.selectedFile || !selected || !available;
 }
 
 async function validateImage(file) {

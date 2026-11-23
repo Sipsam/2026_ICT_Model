@@ -1,12 +1,56 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  APIError, api,
   boxPercent, buildFilters, buildModelRequest, dailySeries, datetimeLocalToISO, defaultDateRange,
-  detectionRows, inspectionEndpoint, inspectionRecord, pageParams, productEvidence, selectDetectionRecord,
+  detectionRows, inspectionEndpoint, inspectionRecord, modelCatalog, pageParams, productEvidence, selectDetectionRecord,
 } from "../src/ict_pipeline/api/dashboard/client.mjs";
 
 const dates = {from: "2026-10-30", through: "2026-11-02"};
 const id = "00000000-0000-4000-8000-000000000001";
+
+test("model catalog accepts schema-less responses and validates mixed availability", () => {
+  const models = modelCatalog({models: [
+    {model_id: "faster-rcnn-final", mode: "real", model: "faster_rcnn", available: true},
+    {model_id: "broken-model", mode: "real", available: false},
+  ]});
+  assert.deepEqual(models.map(model => [model.model_id, model.available]), [
+    ["faster-rcnn-final", true], ["broken-model", false],
+  ]);
+  assert.deepEqual(modelCatalog({models: []}), []);
+  assert.throws(() => modelCatalog({}), /invalid or unsupported/);
+  assert.throws(() => modelCatalog({models: {}}), /invalid or unsupported/);
+  assert.throws(() => modelCatalog({models: [{model_id: "missing-fields"}]}), /invalid or unsupported/);
+  assert.throws(() => modelCatalog({models: [{model_id: "", mode: "real", available: true}]}), /invalid or unsupported/);
+});
+
+test("model catalog API preserves bearer tokens and HTTP error handling", async () => {
+  globalThis.window = {location: {origin: "https://dashboard.test"}};
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url, options) => {
+      calls.push({url: url.toString(), options});
+      return {ok: true, status: 200, json: async () => ({models: []})};
+    };
+    const response = await api("/v1/models", {token: "catalog-token"});
+    assert.deepEqual(modelCatalog(await response.json()), []);
+    assert.equal(calls[0].url, "https://dashboard.test/v1/models");
+    assert.equal(calls[0].options.headers.Authorization, "Bearer catalog-token");
+
+    globalThis.fetch = async () => ({
+      ok: false, status: 503,
+      json: async () => ({error: {code: "model_unavailable"}}),
+    });
+    await assert.rejects(
+      api("/v1/models", {token: "catalog-token"}),
+      error => error instanceof APIError && error.status === 503
+        && error.code === "model_unavailable",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test("product evidence distinguishes pairing, fallback, untrained scores, and missing inputs", () => {
   const product = {
